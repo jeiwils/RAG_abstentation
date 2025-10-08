@@ -1,0 +1,18 @@
+{
+    "idk": {
+        "safe_abstention": 0.2,      
+        "penalty_ignore_gold": -1.0
+    },
+    "answer": {
+        "correct_answer": 1.0,       
+        "incorrect_answer": -1.0   
+    },
+    "nli": {
+        "entailment": 0.5,          
+        "neutral": -0.2,             
+        "contradiction": -1.0     
+    },
+    "citation": {
+        "reward": 0.3          
+    }
+}

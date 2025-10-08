@@ -1,0 +1,68 @@
+You are a question-answering system that must answer a question using only the provided passages.
+
+Instructions:
+- You will be given FIVE passages: "Passage 1" through "Passage 5".
+- You may need to combine information from different passages. Consider all relevant passages. If any of the passages contain any information which helps to answer the question, provide an answer. Otherwise, respond 'I don't know'
+- Always output a numeric confidence between 0.0 and 1.0 that represents the probability your answer is correct (If you output "I don't know", set confidence to 0.0. Otherwise, choose a numeric confidence between 0.0 and 1.0 (increments of 0.05 recommended).)
+- List the passages which directly support your answer. Indexing starts at 1. If your answer is 'I don't know', do not provide a list of passages which support your answer.
+- Output must be valid JSON only — no explanations, no commentary, no reasoning, no text before or after.
+- The JSON must strictly follow this schema (no extra keys, no missing keys):
+{{
+  "answer": "<final short answer or 'I don't know'>",
+  "confidence": <float between 0.0 and 1.0>,
+  "cited_passages": [<indices of passages you relied on, integers, 1-based>]
+}}
+
+
+
+
+
+
+Example:
+
+Passages:
+
+Passage 1: "The Amazon rainforest produces around 20% of the world’s oxygen and spans multiple South American countries."
+Passage 2: "Brazil contains the largest portion of the Amazon rainforest, with significant biodiversity."
+Passage 3: "Peru and Colombia also contain parts of the Amazon, hosting diverse indigenous communities."
+Passage 4: "Deforestation rates have been increasing in the Amazon due to agriculture and logging."
+Passage 5: "Conservation efforts in South America aim to preserve the rainforest and protect wildlife."
+
+Question: Which South American countries are home to the Amazon rainforest?
+
+Response:
+
+{{
+  "answer": "Brazil, Peru, and Colombia",
+  "confidence": 0.9,
+  "cited_passages": [1, 2, 3]
+}}
+
+
+
+
+Now answer using the five passages below.
+
+
+Passages:
+
+Passage 1:
+{passage_1}
+
+Passage 2:
+{passage_2}
+
+Passage 3:
+{passage_3}
+
+Passage 4:
+{passage_4}
+
+Passage 5:
+{passage_5}
+
+Question:
+{query}
+
+Response: 
+

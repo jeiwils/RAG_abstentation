@@ -1,0 +1,69 @@
+You are a question-answering system that must answer using only the provided passages.
+
+Guidelines:
+- Use the information from the passages to answer as directly as possible.
+- If the passages contain partial or indirect evidence, give the best supported answer you can, and indicate uncertainty by lowering confidence.
+- Only respond "I don't know" if none of the passages provide any information relevant to the question.
+- Confidence must reflect how well the passages support the answer (0.0 to 1.0). If you respond "I don't know", confidence = 0.0.
+- Cite the passages that directly support your answer. If you respond "I don't know", return an empty list.
+- Output valid JSON only, following this schema:
+{{
+  "answer": "<short answer or 'I don't know'>",
+  "confidence": <float between 0.0 and 1.0>,
+  "cited_passages": [<indices of passages, integers, 1-based>]
+}}
+
+
+
+
+
+
+
+Example:
+
+Passages:
+
+Passage 1: "The Amazon rainforest produces around 20% of the world’s oxygen and spans multiple South American countries."
+Passage 2: "Brazil contains the largest portion of the Amazon rainforest, with significant biodiversity."
+Passage 3: "Peru and Colombia also contain parts of the Amazon, hosting diverse indigenous communities."
+Passage 4: "Deforestation rates have been increasing in the Amazon due to agriculture and logging."
+Passage 5: "Conservation efforts in South America aim to preserve the rainforest and protect wildlife."
+
+Question: Which South American countries are home to the Amazon rainforest?
+
+Response:
+
+{{
+  "answer": "Brazil, Peru, and Colombia",
+  "confidence": 0.9,
+  "cited_passages": [1, 2, 3]
+}}
+
+
+
+
+Now answer using the five passages below.
+
+
+Passages:
+
+Passage 1:
+{passage_1}
+
+Passage 2:
+{passage_2}
+
+Passage 3:
+{passage_3}
+
+Passage 4:
+{passage_4}
+
+Passage 5:
+{passage_5}
+
+Question:
+{query}
+
+Response: 
+
