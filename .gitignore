@@ -1,0 +1,17 @@
+# Ignore everything
+*
+
+# Except these folders
+!src/
+!data/processed_datasets/
+!data/prompts/
+!data/reward_scheme/
+!.gitignore
+!requirements.txt
+
+# Ignore virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
