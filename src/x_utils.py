@@ -19,8 +19,12 @@ import re
 import unicodedata
 from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from sentence_transformers import SentenceTransformer
+from .z_configs import BGE_MODEL, SPACY_MODEL, DEVICE
+import spacy
 
-
+SPACY_MODEL = "en_core_web_sm"
+nlp = spacy.load(SPACY_MODEL, disable=["textcat"])
 
 
 """          PATHS           """
@@ -83,41 +87,6 @@ def dataset_results_paths(dataset, split, model_name, reward_config):
 """        INDEXING         """
 
 
-def pid_plus_title(qid: str, title: str, sent_idx: int) -> str:
-    """Create a safe passage identifier using question id and title.
-
-
-    only used with 2wikimulihop and hotpotqa - musique already has a unique identifier for each passage
-
-    The title is normalised by converting to lowercase and replacing any
-    non-alphanumeric characters with underscores.  If the provided title is
-    empty or sanitisation results in an empty string, ``"no_title"`` is used
-    instead.
-
-    Parameters
-    ----------
-    qid:
-        The base identifier, typically the question or passage id.
-    title:
-        Title text associated with the passage.
-    sent_idx:
-        Sentence index within the passage.
-
-    Returns
-    -------
-    str
-        A combined identifier ``"{qid}__{safe}_sent{sent_idx}"``.
-    """
-    if not title:
-        safe = "no_title"
-    else:
-        # Replace any non-word characters with underscores and collapse
-        # repeated underscores.  ``\w`` matches alphanumerics and ``_``.
-        safe = re.sub(r"[^0-9A-Za-z]+", "_", title.lower()).strip("_")
-        if not safe:
-            safe = "no_title"
-    return f"{qid}__{safe}_sent{sent_idx}"
-
 
 
 
@@ -179,8 +148,11 @@ def append_jsonl(path: str, obj: Dict) -> None:
 """       CLEANING          """
 
 
-def clean_text(text: str) -> str:
-    """Normalise whitespace and remove simple markup for clean text."""
+def clean_text(text):
+    """
+
+
+    """
     text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(r"\[\[.*?\]\]", "", text)
     text = re.sub(r"\[.*?\]", "", text)
@@ -370,3 +342,12 @@ def load_model_8bit(model_path, enable_fp32_cpu_offload=False):
     )
     
     return tokenizer, model
+
+
+
+
+def load_models(): ### should this be here or in utils??? what else would I use this for? would I use this when making embeddings for the queries?? 
+    print(f"[spaCy] Using: {SPACY_MODEL}")
+    bge_model = SentenceTransformer(BGE_MODEL, device=DEVICE)
+    print(f"[BGE] Loaded {BGE_MODEL} on {DEVICE}")
+    return nlp, bge_model

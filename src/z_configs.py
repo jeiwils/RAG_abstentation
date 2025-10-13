@@ -11,7 +11,6 @@ import os
 import torch 
 
 
-
 BGE_MODEL = os.environ.get("BGE_MODEL", "all-MiniLM-L6-v2")
 SPACY_MODEL = os.environ.get("SPACY_MODEL", "en_core_web_sm")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -21,6 +20,12 @@ RLHF_MODEL = "EleutherAI/gpt-neo-1.3B"
 
 
 SEEDS = [1, 2, 3] 
+
+
+
+"""                 """
+
+
 
 
 

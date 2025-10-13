@@ -98,7 +98,7 @@ import re
 import string
 from tqdm import tqdm
 import json
-from .x_utils import load_jsonl, save_jsonl, append_jsonl, load_model_8bit, dataset_results_paths
+from .x_utils import load_jsonl, save_jsonl, append_jsonl, load_model_8bit, dataset_results_paths, clean_text
 from .z_configs import SEEDS, reward_configs, reward_scheme, gen_params
 from .a_datasets_representations import extract_keywords
 import torch
@@ -745,13 +745,25 @@ def run_rag_pipeline(
         gold_passage_ids = qdata.get("gold_passages", [])
         gold_answer = qdata.get("gold_answer", "")
 
+        query_keywords = set(extract_keywords(
+        query_text,
+        include_ngrams=True,
+        n_max=3,
+        remove_numbers=True
+    ))
+        
+        query_for_embedding = clean_text(query_text)
         # Embed query
         query_emb = embed_model.encode(
-            [query_text],
+            [query_for_embedding],
             normalize_embeddings=True,
             convert_to_numpy=True
         )[0]
-        query_keywords = set(extract_keywords(query_text))
+        #query_keywords = set(extract_keywords(query_text))
+
+        if passage_metadata and "keywords" not in passage_metadata[0]:
+            print("[warn] passage_metadata has no 'keywords' field — Jaccard will be 0 unless you add them.")
+
 
         # Retrieve passages
         retrieved_info = retrieve_passages(
