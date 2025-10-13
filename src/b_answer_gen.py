@@ -1,6 +1,18 @@
 """
 
 
+
+TO DO FOR DPO/PPO
+- generate multiple answers per query (RLHF uses just the first answer of these)
+- 
+
+
+
+
+
+
+
+
 same quantisation (8-b), batch size, context/sequence length, device, temp, top-k/p, beam, repetition penalty, do sample/greedy,seed... for all models 
 
 
@@ -77,7 +89,8 @@ logic behind the answer (CoT)
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import gc
-
+import time
+import random 
 import os
 from typing import List, Dict, Set, Callable, Counter
 import faiss
@@ -85,7 +98,8 @@ import re
 import string
 from tqdm import tqdm
 import json
-from .x_utils import load_jsonl, save_jsonl, append_jsonl
+from .x_utils import load_jsonl, save_jsonl, append_jsonl, load_model_8bit, dataset_results_paths
+from .z_configs import SEEDS, reward_configs, reward_scheme, gen_params
 from .a_datasets_representations import extract_keywords
 import torch
 import random
@@ -128,77 +142,9 @@ models = {
 ANSWER_PROMPT = "data/prompts/answer_prompt2.txt"
 
 
-"""              REWARD STUFF           """
 
 
 
-
-# Practical subset of reward configs for experimentation
-reward_configs = [ ##### what's 'use confidence'???
-    {"scale_idk_penalty": True,  "score_NLI_result": True,  "use_confidence": True},   # full grounding + confidence
-    {"scale_idk_penalty": True,  "score_NLI_result": True,  "use_confidence": False},  # ignore confidence
-    {"scale_idk_penalty": True,  "score_NLI_result": False, "use_confidence": True},   # ignore NLI
-    {"scale_idk_penalty": False, "score_NLI_result": True,  "use_confidence": True},   # penalize IDK uniformly
-    {"scale_idk_penalty": False, "score_NLI_result": False, "use_confidence": False}  # minimal shaping baseline
-]
-
-
-
-
-reward_scheme = {
-    "idk": {
-        "safe_abstention": 0.2,      # small positive (not dominant)
-        "penalty_ignore_gold": -1.0, # abstain when gold present = strongly negative
-    },
-    "answer": {
-        "correct_answer": 1.0,       # full reward for correct
-        "incorrect_answer": -1.0,    # strong penalty for wrong
-    },
-    "nli": {
-        "entailment": +0.5,          # bonus for groundedness
-        "neutral": -0.2,             # soft penalty
-        "contradiction": -1.0,       # hard penalty
-    },
-    "citation": {
-        "reward": 0.3,               # small bonus for correct citation coverage
-    }
-}
-
-
-
-
-
-
-
-"""             GENERATION STUFF            """
-
-
-# Generation parameters
-gen_params = {
-    "max_new_tokens": 254, # "max_length": 512, # MAX_NEW_TOKENS just for generation tokens, while max_length includes prompt length
-
-    "temperature": 0.7, ############# ADJUST ACCORDING TO THE MODEL I USE
-
-    "top_p": 0.95, # cumulative probability threshold # I NEED TO LOOK INTO NUCLEUS SAMPLING
-    "top_k": 40, # take only 50 highest-prob tokens for sampling
-
-    "do_sample": True, # samples from distribution, instead of taking just the most likely token #### can be used to capture model uncertainty???
-
-    "num_return_sequences": 3, # sample multiple answers 
-    "repetition_penalty": 1.1 # penalise repeating same token sequences
-}
-
-
-
-
-""""             REPRODUCIBILITY            """
-
-
-# Seeds for reproducibility # should I set these as lists, for looping?????? ###########################################
-SEED = 1
-torch.manual_seed(SEED)
-random.seed(SEED)
-np.random.seed(SEED)
 
 
 
@@ -239,47 +185,9 @@ MAX_RETRIEVED_PASSAGES = 5  # max passages to retrieve per query
 # -------------------------
 
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-
-def load_model_8bit(model_path, enable_fp32_cpu_offload=False):
-    """
-    Load a causal LM in 8-bit with optional FP32 CPU offload for large models.
-    
-    Args:
-        model_path (str): path to HuggingFace model
-        enable_fp32_cpu_offload (bool): whether to enable llm_int8_enable_fp32_cpu_offload
-    
-    Returns:
-        tokenizer, model
-    """
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
-    
-    quant_config = BitsAndBytesConfig(
-        load_in_8bit=True,
-        llm_int8_enable_fp32_cpu_offload=enable_fp32_cpu_offload
-    )
-    
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        quantization_config=quant_config,
-        device_map="auto",
-        trust_remote_code=True,
-        local_files_only=True
-    )
-    
-    return tokenizer, model
 
 
-# def load_model_8bit(model_path):
-#     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
-#     model = AutoModelForCausalLM.from_pretrained(
-#         model_path,
-#         load_in_8bit=True,
-#         device_map="auto",
-#         trust_remote_code=True,
-#         local_files_only=True
-#     )
-#     return tokenizer, model
+
 
 
 
@@ -391,9 +299,9 @@ def retrieve_passages(
         results.append(
             {
                 "idx": idx,
-                "sim_cos": round(sim_cos, 4), ########## is it normal to round here in results???
-                "sim_jac": round(sim_jac, 4),
-                "sim_hybrid": round(sim_hybrid, 4),
+                "sim_cos": float(sim_cos,),
+                "sim_jac": float(sim_jac),
+                "sim_hybrid": float(sim_hybrid)
             }
         )
 
@@ -511,8 +419,15 @@ def generate_answer(model, tokenizer, query, passages, gen_params, prompt_path=A
 
 
 
-def rerank_answers(candidates, passages, embed_model, score_NLI_result):
+def rerank_answers(
+        candidates, 
+        passages, 
+        embed_model, 
+        score_NLI_result
+        ):
     """
+    for DPO, and multi-answer RLHF
+
     Rerank multiple candidate answers based on grounding signals.
     
     Args:
@@ -580,37 +495,52 @@ def rerank_answers(candidates, passages, embed_model, score_NLI_result):
 
 
 
+
+
+
+
+
+
+
+
+
+
 """ EVALUATION METRICS + REWARD FUNCTION"""
 
 
 
-def NLI_check_answer(answer, passages):
+def NLI_check_answer_per_passage(answer, passages, reward_scheme):
     """
-    Perform NLI/entailment check between the model-generated answer and retrieved passages.
-    Returns: one of "entailment", "contradiction", "neutral" as given by the NLI model.
+    Perform NLI/entailment check between the model-generated answer and each retrieved passage.
+    Returns a list of numeric scores per passage based on reward_scheme['nli'].
 
     Args:
         answer (str): generated answer
         passages (list[str]): list of retrieved passages (premises)
+        reward_scheme (dict): reward scheme containing "nli" mapping
 
     Returns:
-        str: "entailment", "contradiction", or "neutral"
+        List[float]: numeric scores for each passage
     """
-    premise = " ".join(passages)
-    inputs = tokenizer_nli(premise, answer, return_tensors="pt", truncation=True).to("cuda")
+    nli_rewards = reward_scheme.get("nli", {"entailment": 0.5, "neutral": -0.2, "contradiction": -1.0})
+    scores = []
 
-    with torch.no_grad():
-        logits = model_nli(**inputs).logits
-        probs = torch.softmax(logits, dim=-1)
-        pred_class = torch.argmax(probs, dim=-1).item()
+    for passage in passages:
+        inputs = tokenizer_nli(passage, answer, return_tensors="pt", truncation=True).to("cuda")
+        with torch.no_grad():
+            logits = model_nli(**inputs).logits
+            pred_class = torch.argmax(torch.softmax(logits, dim=-1), dim=-1).item()
 
-    # Map class index to MNLI labels
-    mnli_labels = ["contradiction", "neutral", "entailment"]
-    return mnli_labels[pred_class]
+        mnli_labels = ["contradiction", "neutral", "entailment"]
+        label = mnli_labels[pred_class]
+        scores.append(nli_rewards[label])
+
+    return scores
 
 
 
-def normalise_for_em(s: str) -> str:
+
+def normalise_for_em(s: str): # what is s in this case? the output???
     """
     Normalize an answer for EM/F1 calculation:
     - Lowercase
@@ -627,8 +557,8 @@ def normalise_for_em(s: str) -> str:
 
 
 def compute_em(
-        prediction: str, 
-        gold_answer: str
+        prediction, 
+        gold_answer
         ):
     """
     EM is 1 if normalized prediction == normalized gold, else 0.
@@ -638,8 +568,8 @@ def compute_em(
 
 
 def compute_f1(
-        prediction: str, 
-        gold_answer: str
+        prediction, 
+        gold_answer
         ):
     """
     Compute token-level F1 between prediction and gold after normalization.
@@ -662,7 +592,20 @@ def compute_f1(
 
 
 
-def compute_agreement_reward(model, tokenizer, query, passages, gen_params, N=3):
+
+
+def compute_agreement_reward(
+    model, 
+    tokenizer, 
+    query, 
+    passages, 
+    gen_params, 
+    N=3):
+    """
+    
+    
+    
+    """
     answers = []
     for _ in range(N):
         answer_info = generate_answer(model, tokenizer, query, passages, gen_params)
@@ -676,28 +619,28 @@ def compute_agreement_reward(model, tokenizer, query, passages, gen_params, N=3)
 
 
 
-
-def compute_reward(
+def compute_total_reward(
     answer_info,
     gold_answer,
-    retrieved_ids: list,
-    retrieved_texts: list,
-    gold_passage_ids: list,
+    retrieved_ids,
+    retrieved_texts,
+    gold_passage_ids,
     reward_scheme,
-    NLI_result=None,
     correctness="hybrid",
-    score_NLI_result=True,
     scale_idk_penalty=True,
     use_confidence=True,
+    multi_answers=None,       # list of other answers for agreement
+    NLI_score_passages="retrieved"  # "retrieved" | "cited" | "None"
 ):
     reward = 0
+    is_idk = answer_info.get("idk", False)
 
-    # --- IDK penalty using IDs ---
+    # --- IDK reward / penalty ---
     retrieved_gold = sum(rid in gold_passage_ids for rid in retrieved_ids)
     retrieved_total = len(retrieved_ids) or 1
     gold_coverage = retrieved_gold / retrieved_total
 
-    if answer_info.get("idk", False):
+    if is_idk:
         if retrieved_gold == 0:
             reward += reward_scheme["idk"]["safe_abstention"]
         else:
@@ -705,17 +648,17 @@ def compute_reward(
             reward += penalty * (gold_coverage if scale_idk_penalty else 1)
         return reward
 
-    # --- Cited coverage for citation reward ---
+    # --- Citation reward ---
     cited_idxs = answer_info.get("cited_passages", list(range(len(retrieved_texts))))
     cited_texts = [retrieved_texts[i] for i in cited_idxs if 0 <= i < len(retrieved_texts)]
     cited_ids = [retrieved_ids[i] for i in cited_idxs if 0 <= i < len(retrieved_ids)]
-    
+
     cited_gold = sum(cid in gold_passage_ids for cid in cited_ids)
     cited_total = len(cited_ids) or 1
     cited_coverage = cited_gold / cited_total
-    reward += cited_coverage * reward_scheme.get("citation", {}).get("reward", 1.0)
+    reward += cited_coverage * reward_scheme.get("citation", {}).get("reward", 0.3)
 
-    # --- Answer correctness using actual text ---
+    # --- Answer correctness ---
     em_score = compute_em(answer_info["answer"], gold_answer)
     f1_score = compute_f1(answer_info["answer"], gold_answer)
 
@@ -731,34 +674,29 @@ def compute_reward(
     else:
         reward += reward_scheme["answer"]["incorrect_answer"]
 
-    # --- NLI adjustments ---
-    if score_NLI_result and NLI_result is not None:
-        reward += reward_scheme["nli"].get(NLI_result, 0)
+    # --- NLI reward ---
+    if NLI_score_passages == "retrieved":
+        nli_targets = retrieved_texts
+    elif NLI_score_passages == "cited":
+        nli_targets = cited_texts
+    else:  # "None"
+        nli_targets = []
 
-    # --- Confidence calibration ---
-    if use_confidence:
-        confidence = float(answer_info.get("confidence", 0.5))
-        if NLI_result == "contradiction":
-            reward -= confidence * 1.0
-        elif NLI_result == "neutral":
-            reward -= confidence * 0.5
-        elif NLI_result == "entailment":
-            reward += confidence * 0.5
+    if nli_targets:
+        nli_scores = NLI_check_answer_per_passage(answer_info["answer"], nli_targets, reward_scheme)
+        reward += float(np.mean(nli_scores))
+        if use_confidence:
+            conf = float(answer_info.get("confidence", 0.5))
+            reward += conf * np.mean(nli_scores)
+
+    # --- Multi-answer agreement ---
+    if multi_answers is not None and len(multi_answers) > 1:
+        counts = Counter([ans.lower() for ans in multi_answers])
+        maj_count = counts.most_common(1)[0][1]
+        agreement_score = maj_count / len(multi_answers)
+        reward += reward_scheme.get("agreement", {}).get("reward", 0.2) * agreement_score
 
     return reward
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -775,8 +713,10 @@ def compute_reward(
 """ RUN PIPELINE """
 
 
-
 def run_rag_pipeline(
+    dataset,
+    split,
+    model_name,
     model,
     tokenizer,
     queries: List[Dict],
@@ -784,20 +724,20 @@ def run_rag_pipeline(
     passage_index,
     embed_model,
     gen_params,
-    out_path,
-    debug_path: str | None = None, 
+    reward_scheme,
+    SEEDS=[1, 2, 3],
     top_k: int = MAX_RETRIEVED_PASSAGES,
     alpha: float = DEFAULT_HYBRID_ALPHA,
     scale_idk_penalty: bool = True,
     score_NLI_result: bool = True,
     use_confidence: bool = True,
+    out_path: str = None,
+    debug_path: str = None,
 ):
     """
-    Full RAG workflow with hybrid reward:
-    - Uses passage IDs for IDK and citation coverage
-    - Uses passage texts for EM/F1/NLI
+    Full RAG workflow with multi-answer generation and agreement rewards.
+    Supports RLHF, PPO, DPO seamlessly.
     """
-    results = []
 
     for qdata in tqdm(queries, desc="Processing queries", unit="query"):
         query_text = qdata["question"]
@@ -813,7 +753,7 @@ def run_rag_pipeline(
         )[0]
         query_keywords = set(extract_keywords(query_text))
 
-        # Retrieve passages (hybrid)
+        # Retrieve passages
         retrieved_info = retrieve_passages(
             query_vec=query_emb,
             query_keywords=query_keywords,
@@ -822,98 +762,87 @@ def run_rag_pipeline(
             top_k=top_k,
             alpha=alpha
         )
-
         retrieved_ids = [passage_metadata[r["idx"]]["passage_id"] for r in retrieved_info]
         retrieved_texts = [passage_metadata[r["idx"]]["text"] for r in retrieved_info]
 
-        # --- Generate answer ---
-        #answer_info = generate_answer(model, tokenizer, query_text, retrieved_texts, gen_params) ################ PUT HERE I THINK
+        for seed in SEEDS:
+            torch.manual_seed(seed)
+            random.seed(seed)
+            np.random.seed(seed)
 
-        # Sample multiple answers
-        candidates = []
-        for _ in range(gen_params["num_return_sequences"]):
-            torch.manual_seed(random.randint(0, 1e9))  ##### HOW DOES THIS WORK WITH REPRODUCIBILITY?????
-            cand = generate_answer(
-                model=model,
-                tokenizer=tokenizer,
-                query=query_text,
-                passages=retrieved_texts,
-                gen_params=gen_params,
-                prompt_path=ANSWER_PROMPT,
-            )
-            candidates.append(cand)
+            # --- Multi-answer generation ---
+            candidates = []
+            for _ in range(gen_params["num_return_sequences"]):
+                cand = generate_answer(model, tokenizer, query_text, retrieved_texts, gen_params)
+                cand["seed"] = seed
+                candidates.append(cand)
 
-
-        # Rerank
-        final_answer = rerank_answers(candidates, retrieved_texts, embed_model, score_NLI_result)
+            # Collect all answers for agreement reward
+            multi_answers = [c["answer"].strip() for c in candidates]
 
 
 
 
-        parse_fail = False
-        if not final_answer.get("answer") and not final_answer.get("cited_passages"):
-            parse_fail = True
+            # Save multi-answer debug info
+            if debug_path:
+                debug_entry = {
+                    "question_id": query_id,
+                    "query": query_text,
+                    "answers": multi_answers,
+                    "cited_passages": [c["cited_passages"] for c in candidates],
+                    "seeds": [c["seed"] for c in candidates],
+                }
+                append_jsonl(debug_path, debug_entry)
 
-        # --- Debug entry ---
-        debug_entry = {
-            "question_id": query_id,
-            "query": query_text,
-            "gold_passage_ids": gold_passage_ids,
-            "retrieved_passage_ids": retrieved_ids,
-            "raw_output": final_answer.get("raw_output", ""),
-            "cleaned_output": final_answer.get("cleaned_output", ""),
-            "parsed": {
-                "answer": final_answer["answer"],
-                "confidence": final_answer["self_conf"],
-                "cited_passages": final_answer["cited_passages"]
-            },
-            "parse_fail": parse_fail,
-            "error": final_answer.get("error")
-        }
-        append_jsonl(debug_path, debug_entry)
 
-        # --- Map cited indices to texts & IDs ---
-        cited_idxs = final_answer.get("cited_passages", list(range(len(retrieved_texts))))
-        cited_texts = [retrieved_texts[i] for i in cited_idxs if 0 <= i < len(retrieved_texts)]
-        cited_ids = [retrieved_ids[i] for i in cited_idxs if 0 <= i < len(retrieved_ids)]
 
-        # --- NLI check (only if not IDK) ---
-        NLI_result = None
-        if not final_answer["idk"] and score_NLI_result:
-            NLI_result = NLI_check_answer(final_answer["answer"], cited_texts)
 
-        # --- Reward computation ---
-        reward = compute_reward(
-            final_answer,
-            gold_answer,
-            retrieved_ids,
-            retrieved_texts,
-            gold_passage_ids,
-            reward_scheme,
-            NLI_result=NLI_result,
-            correctness="hybrid",
-            score_NLI_result=score_NLI_result,
-            scale_idk_penalty=scale_idk_penalty,
-            use_confidence=use_confidence
-        )
 
-        # --- Result entry ---
-        result_entry = {
-            "question_id": query_id,
-            "query": query_text,
-            "gold_answer": gold_answer,
-            "answer": final_answer["answer"],
-            "idk": final_answer["idk"],
-            "confidence": final_answer["self_conf"],
-            "retrieved": retrieved_texts,
-            "retrieved_ids": retrieved_ids,
-            "cited_texts": cited_texts,
-            "cited_ids": cited_ids,
-            "reward": reward,
-            "NLI_result": NLI_result,
-        }
 
-        append_jsonl(out_path, result_entry)
+            # --- Rerank candidates ---
+            final_answer = rerank_answers(candidates, retrieved_texts, embed_model, score_NLI_result)
+
+            # Map cited indices to texts & IDs
+            cited_idxs = final_answer.get("cited_passages", list(range(len(retrieved_texts))))
+            cited_texts = [retrieved_texts[i] for i in cited_idxs if 0 <= i < len(retrieved_texts)]
+            cited_ids = [retrieved_ids[i] for i in cited_idxs if 0 <= i < len(retrieved_ids)]
+
+            # --- Reward computation (with per-passage NLI and agreement) ---
+            reward = compute_total_reward(
+                final_answer,
+                gold_answer,
+                retrieved_ids,
+                retrieved_texts,
+                gold_passage_ids,
+                reward_scheme,
+                correctness="hybrid",
+                scale_idk_penalty=rc["scale_idk_penalty"],
+                use_confidence=rc["use_confidence"],
+                multi_answers=multi_answers,
+                NLI_score_passages=rc["NLI_score_passages"]
+)
+
+            # --- Save final result per seed ---
+            if out_path:
+                result_entry = {
+                    "question_id": query_id,
+                    "query": query_text,
+                    "gold_answer": gold_answer,
+                    "answer": final_answer["answer"],
+                    "idk": final_answer.get("idk", False),
+                    "confidence": final_answer.get("self_conf", 0.0),
+                    "retrieved_texts": retrieved_texts,
+                    "retrieved_ids": retrieved_ids,
+                    "cited_texts": cited_texts,
+                    "cited_ids": cited_ids,
+                    "reward": reward,
+                    "seed": seed,
+                    "multi_answers": multi_answers
+                }
+                append_jsonl(out_path, result_entry)
+
+
+
 
 
 

@@ -18,4 +18,9 @@ How does the amount of reward affect it? Does scaling the 'idk' penality by how 
 
 
 
+
+
+
+
+
 """

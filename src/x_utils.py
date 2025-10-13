@@ -18,8 +18,69 @@ import os
 import re
 import unicodedata
 from pathlib import Path
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 
+
+
+"""          PATHS           """
+
+
+def processed_dataset_paths(dataset, split):
+    """
+    Return standard paths for processed dataset files.
+
+    Creates ``data/processed_datasets/{dataset}/{split}/`` if necessary and
+    returns paths for ``questions.jsonl`` and ``passages.jsonl``.
+
+    """
+    base = Path(f"data/processed_datasets/{dataset}/{split}")
+    base.mkdir(parents=True, exist_ok=True)
+    return {
+        "base": base,
+        "questions": base / "questions.jsonl",
+        "passages": base / "passages.jsonl",
+    }
+
+
+def dataset_rep_paths(dataset, split):
+    """
+    Return paths for dataset-level passage representations, embeddings, FAISS index, and sparse keywords.
+    """
+    base = os.path.join("data", "representations", "datasets", dataset, split)
+    os.makedirs(base, exist_ok=True)
+    return {
+        "passages_jsonl": os.path.join(base, f"{dataset}_passages.jsonl"),
+        "passages_emb": os.path.join(base, f"{dataset}_passages_emb.npy"),
+        "passages_index": os.path.join(base, f"{dataset}_faiss_passages.faiss"),
+        "passages_sparse_jsonl": os.path.join(base, f"{dataset}_passages_sparse.jsonl"),
+    }
+
+
+
+
+def dataset_results_paths(dataset, split, model_name, reward_config):
+    """
+    Return paths for storing RLHF results, logs, and updated models for a specific dataset/split/model/reward config.
+    
+    Directory structure:
+    data/results/{dataset}/{split}/{model_name}/{reward_config}/
+    """
+    base = os.path.join("data", "results", dataset, split, model_name, reward_config)
+    os.makedirs(base, exist_ok=True)
+    
+    return {
+        "base": base,
+        "updated_model_dir": os.path.join(base, "model_rlhf_updated"),
+        "log_file": os.path.join(base, "training.log"),
+        "jsonl_path": os.path.join(base, "answers_with_rewards.jsonl"),
+    }
+
+
+
+
+
+"""        INDEXING         """
 
 
 def pid_plus_title(qid: str, title: str, sent_idx: int) -> str:
@@ -56,6 +117,21 @@ def pid_plus_title(qid: str, title: str, sent_idx: int) -> str:
         if not safe:
             safe = "no_title"
     return f"{qid}__{safe}_sent{sent_idx}"
+
+
+
+
+
+
+
+
+"""         JSON            """
+
+
+
+
+
+
 
 
 def load_jsonl(path: str, log_skipped: bool = False) -> Iterator[Dict]:
@@ -98,6 +174,9 @@ def append_jsonl(path: str, obj: Dict) -> None:
 
 
 
+
+
+"""       CLEANING          """
 
 
 def clean_text(text: str) -> str:
@@ -147,6 +226,9 @@ def normalise_text(s: str) -> str:
 
 
 
+
+
+"""          RESUME               """
 
 
 
@@ -257,3 +339,34 @@ def compute_resume_sets(
 
 
 
+"""      MODEL LOADING       """
+
+
+
+def load_model_8bit(model_path, enable_fp32_cpu_offload=False):
+    """
+    Load a causal LM in 8-bit with optional FP32 CPU offload for large models.
+    
+    Args:
+        model_path (str): path to HuggingFace model
+        enable_fp32_cpu_offload (bool): whether to enable llm_int8_enable_fp32_cpu_offload
+    
+    Returns:
+        tokenizer, model
+    """
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
+    
+    quant_config = BitsAndBytesConfig(
+        load_in_8bit=True,
+        llm_int8_enable_fp32_cpu_offload=enable_fp32_cpu_offload
+    )
+    
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        quantization_config=quant_config,
+        device_map="auto",
+        trust_remote_code=True,
+        local_files_only=True
+    )
+    
+    return tokenizer, model

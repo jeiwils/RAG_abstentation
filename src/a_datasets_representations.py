@@ -15,17 +15,14 @@ cd C:/Users/jeiwi/Data_projects/RAG_abstentation
 """
 
 from __future__ import annotations
+from z_configs import BGE_MODEL, SPACY_MODEL, DEVICE
 
-
-import spacy
-import re
-from itertools import islice
 
 from pathlib import Path
 import re
 import spacy
 import json
-from typing import Dict, Iterable, List, Set
+from typing import Dict, List, Set
 import numpy as np
 import os
 import faiss
@@ -35,9 +32,11 @@ from .x_utils import (
     compute_resume_sets,
     load_jsonl,
     pid_plus_title,
-    normalise_text
+    normalise_text,
+    processed_dataset_paths,
+    dataset_rep_paths
 )
-import torch 
+
 from sentence_transformers import SentenceTransformer
 
 
@@ -45,39 +44,22 @@ from sentence_transformers import SentenceTransformer
 
 
 
-# ---------------------------------------------------------------------------
-# Generic dataset processing
+"""                             """
 
 
 
 
-def processed_dataset_paths(dataset: str, split: str) -> Dict[str, Path]:
-    """
-    Return standard paths for processed dataset files.
 
-    Creates ``data/processed_datasets/{dataset}/{split}/`` if necessary and
-    returns paths for ``questions.jsonl`` and ``passages.jsonl``.
-
-    """
-    base = Path(f"data/processed_datasets/{dataset}/{split}")
-    base.mkdir(parents=True, exist_ok=True)
-    return {
-        "base": base,
-        "questions": base / "questions.jsonl",
-        "passages": base / "passages.jsonl",
-    }
 
 
 
 def process_dataset(
-    *, ############ ???????
     dataset,
     split,
     file_path,
     field_map,
     max_examples,
-    overwrite = False,
-    resume,
+    resume = True,
 ):
     """Process ``file_path`` using ``field_map``.
 
@@ -96,14 +78,12 @@ def process_dataset(
         single example and either return a value or an iterable of values.
     max_examples:
         Optional limit for the number of examples processed.
-    overwrite:
-        Unused but kept for backward compatibility.
     resume:
         Whether to resume from existing processed files.
     """
 
     # ---- Load raw examples -------------------------------------------------
-    examples: List[Dict] ######## what's this???? 
+    examples = []
     with open(file_path, "r", encoding="utf-8") as f:
         if file_path.endswith(".jsonl"):
             examples = []
@@ -136,7 +116,7 @@ def process_dataset(
         id_field="question_id",
     )
 
-    def iter_pids(): ############ why is this defined here? 
+    def iter_pids(): 
         for ex in examples:
             for pid, _title, _text in iter_passages_fn(ex):
                 yield pid
@@ -210,7 +190,7 @@ def process_dataset(
 
 
 
-def embed_and_save( ########### CHECK THIS - LOOKS A BIT RIDICULOUS 
+def embed_and_save( ########### CHECK THIS - LOOKS A BIT RIDICULOUS ### WHY IS THIS NOT USED ANYWHERE???? 
     input_jsonl,
     output_npy,
     output_jsonl,
@@ -373,8 +353,6 @@ def build_and_save_faiss_index(
 """         SPARSE: Spacy NER + keyword extraction        """ 
 
 
-
-
 ALIAS = {
     "us": "united_states", "u_s": "united_states", "u_s_a": "united_states",
     "united_states_of_america": "united_states", "the_united_states": "united_states",
@@ -397,11 +375,6 @@ KEEP_ENTS = {"PERSON", "ORG", "GPE", "LOC", "FAC", "PRODUCT",
 SPACY_MODEL = "en_core_web_sm"
 nlp = spacy.load(SPACY_MODEL, disable=["parser", "textcat"])
 
-
-
-
-
-
 def filter_keyword(kw, remove_numbers=True):
     kw = ALIAS.get(kw, kw)
     if kw is None:
@@ -412,10 +385,7 @@ def filter_keyword(kw, remove_numbers=True):
                 return None
     return kw
 
-
-
-
-def generate_ngrams(tokens, n_max=3):
+def generate_ngrams(tokens, n_max=3): #######################################################################
     """Return all n-grams (up to n_max) from tokens, skipping stopwords and punctuation."""
     ngrams = set()
     n_tokens = len(tokens)
@@ -428,10 +398,6 @@ def generate_ngrams(tokens, n_max=3):
             phrase = "_".join([t.text.lower() for t in gram_tokens])
             ngrams.add(phrase)
     return ngrams
-
-
-
-
 
 def extract_keywords(text: str, include_ngrams=True, n_max=3, remove_numbers=True) -> list[str]:
     """
@@ -472,32 +438,20 @@ def extract_keywords(text: str, include_ngrams=True, n_max=3, remove_numbers=Tru
 
 
 
-"""        """
 
 
 
 
 
-def dataset_rep_paths(dataset, split):
-    """
-    Return paths for dataset-level passage representations, embeddings, FAISS index, and sparse keywords.
-    """
-    base = os.path.join("data", "representations", "datasets", dataset, split)
-    os.makedirs(base, exist_ok=True)
-    return {
-        "passages_jsonl": os.path.join(base, f"{dataset}_passages.jsonl"),
-        "passages_emb": os.path.join(base, f"{dataset}_passages_emb.npy"),
-        "passages_index": os.path.join(base, f"{dataset}_faiss_passages.faiss"),
-        "passages_sparse_jsonl": os.path.join(base, f"{dataset}_passages_sparse.jsonl"),
-    }
+
+
 
 
 
 
 
 """         MAIN         """
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import bitsandbytes as bnb
+
 
 
 
@@ -509,6 +463,15 @@ def load_models():
     print(f"[BGE] Loaded {BGE_MODEL} on {DEVICE}")
     return nlp, bge_model
 
+
+
+
+"""
+
+I could define passage field maps here - so it's better and more generalisable? 
+
+
+"""
 
 
 
@@ -524,10 +487,10 @@ if __name__ == "__main__":
     BATCH_SIZE = 128  
 
 
-    SPACY_MODEL = os.environ.get("SPACY_MODEL", "en_core_web_sm")
+    # SPACY_MODEL = os.environ.get("SPACY_MODEL", "en_core_web_sm")
     
-    BGE_MODEL = os.environ.get("BGE_MODEL", "all-MiniLM-L6-v2")
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    # BGE_MODEL = os.environ.get("BGE_MODEL", "all-MiniLM-L6-v2")
+    # DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
     nlp, bge_model = load_models()
 
@@ -593,7 +556,7 @@ if __name__ == "__main__":
                             "get_answer": lambda ex: ex.get("answer", ""),
                             "iter_passages": lambda ex: [
                                 (
-                                    f"{ex['id']}_sent{p.get('idx') if p.get('idx') is not None else i}",
+                                    f"{ex['id']}_sent{p.get('idx') if p.get('idx') is not None else i}", ### why is this an f string??? 
                                     p.get("title", ""),
                                     p.get("paragraph_text", ""),
                                 )
@@ -607,12 +570,12 @@ if __name__ == "__main__":
                         }
 
                     process_dataset(
-                        dataset=dataset,
-                        split=split,
-                        file_path=file_path,
-                        field_map=field_map,
-                        max_examples=MAX_EXAMPLES,
-                        resume=RESUME,
+                        dataset,
+                        split,
+                        file_path,
+                        field_map,
+                        MAX_EXAMPLES,
+                        RESUME,
                     )
 
 
