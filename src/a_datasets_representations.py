@@ -32,36 +32,11 @@ from .x_utils import (
     SPACY_MODEL,
     nlp,
 )
-
+from .z_configs import FIELD_MAPS
 
 
 
 """             GENERAL DATASET PROCESSING FUNCTION                """
-
-
-def pid_plus_title( 
-        qid, 
-        title, 
-        sent_idx
-        ):
-    """
-
-    ##########################################################
-
-    """
-    if not title:
-        safe = "no_title"
-    else:
-
-        safe = re.sub(r"[^0-9A-Za-z]+", "_", title.lower()).strip("_")
-        if not safe:
-            safe = "no_title"
-    return f"{qid}__{safe}_sent{sent_idx}"
-
-
-
-
-
 
 
 
@@ -422,64 +397,6 @@ def process_batch(
 
 
 """         MAIN         """
-
-
-
-
-
-
-
-
-FIELD_MAPS = {
-    "hotpotqa": {
-        "get_qid": lambda ex: ex["_id"],
-        "get_question_text": lambda ex: ex["question"],
-        "get_answer_text": lambda ex: ex.get("answer", ""),
-        "iter_passages": lambda ex: [
-            (pid_plus_title(ex["_id"], title, i), title, sent)
-            for title, sents in ex["context"]
-            for i, sent in enumerate(sents)
-        ],
-        "gold_passage_ids": lambda ex: [
-            pid_plus_title(ex["_id"], title, idx)
-            for title, idx in ex.get("supporting_facts", [])
-        ],
-    },
-    "2wikimultihopqa": {  # similar to hotpotqa
-        "get_qid": lambda ex: ex["_id"],
-        "get_question_text": lambda ex: ex["question"],
-        "get_answer_text": lambda ex: ex.get("answer", ""),
-        "iter_passages": lambda ex: [
-            (pid_plus_title(ex["_id"], title, i), title, sent)
-            for title, sents in ex["context"]
-            for i, sent in enumerate(sents)
-        ],
-        "gold_passage_ids": lambda ex: [
-            pid_plus_title(ex["_id"], title, idx)
-            for title, idx in ex.get("supporting_facts", [])
-        ],
-    },
-    "musique": {
-        "get_qid": lambda ex: ex["id"],
-        "get_question_text": lambda ex: ex.get("question", ""),
-        "get_answer_text": lambda ex: ex.get("answer", ""),
-        "iter_passages": lambda ex: [
-            (
-                f"{ex['id']}_sent{p.get('idx') if p.get('idx') is not None else i}",
-                p.get("title", ""),
-                p.get("paragraph_text", ""),
-            )
-            for i, p in enumerate(ex.get("paragraphs", []))
-        ],
-        "gold_passage_ids": lambda ex: [
-            f"{ex['id']}_sent{p.get('idx') if p.get('idx') is not None else i}"
-            for i, p in enumerate(ex.get("paragraphs", []))
-            if p.get("is_supporting")
-        ],
-    }
-}
-
-
 
 
 
