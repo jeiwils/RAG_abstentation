@@ -1,19 +1,8 @@
 """
 
 
-
-TO DO FOR DPO/PPO
-- generate multiple answers per query (RLHF uses just the first answer of these)
-- 
-
-
-
-
-
-
-
-
-same quantisation (8-b), batch size, context/sequence length, device, temp, top-k/p, beam, repetition penalty, do sample/greedy,seed... for all models 
+cd C:/Users/jeiwi/Data_projects/RAG_abstentation
+./venv/Scripts/python.exe -m src.b_answer_gen
 
 
 
@@ -22,65 +11,6 @@ same quantisation (8-b), batch size, context/sequence length, device, temp, top-
 
 
 
-
-"""
-
-
-
-
-##### REWARDS
-
-# TO ADD:
-# - model says it's confident about an answer that contradicts NLI result 
-# - two categories: 1) models output itself, 2) model's use of retrieved passages
-# - CoT: token consistency between CoT and gold passages/answers, adversarial critique of CoT, 
-
-
-
-
-GENERAL PRINCIPLES:
-- generator-controlled first, then NLI grounding (single answer, multi-answer, or CoT answer)
-- robustness & stability
-- hallucination reduction 
-- 
-
-
-
-TO LOOK INTO:
-- expose model to adversarial prompts or hallucination traps; reward resilience / cautious answering (safety-critical deployments)
-
-
-
-
-RETRIEVAL STUFF:
-- weight sentences by semantic importance in passsages
-- vary retrieval slightly - rewards stable answers - robustness
-- 
-
-
-ANSWER GEN STUFF:
-
-
-general:
-- generate multiple answers/CoT + reward agreement/consitency between them (embedding-based similarity)
-- embed generated answer + retrieved passages - reward cosine similarity (semantic closeness) - reduces hallucination
-- generate answers -> paraphrase -> regenerate question -> check match ->   reward match (consistency cycle)
-
-
-answer itself
-- right/wrong/idk + confidence 
---- 
-answer in relation to the retrieved passages (NLI)
-- right/wrong/idk + confidence + answer/passages  entailment 
---- reward IDK when passages are weak or contradictory 
-logic behind the answer (CoT)
-- right/wrong/idk + confidence + answer/passages entailment + logic
---- consistency of logic (separate critic model)
---- contradiction of logic (separate critic model)
---- each reasoning step cites a passage(s) -> NLI to check consitency between reasoning and passage -> reward consistency 
-
-
-"""
 
 
 
@@ -98,7 +28,7 @@ import re
 import string
 from tqdm import tqdm
 import json
-from .x_utils import load_jsonl, save_jsonl, append_jsonl, load_model_8bit, dataset_results_paths, clean_text
+from .x_utils import load_jsonl, save_jsonl, append_jsonl, load_model_8bit, dataset_results_paths, clean_text, dataset_rep_paths
 from .z_configs import SEEDS, reward_configs, reward_scheme, gen_params
 from .a_datasets_representations import extract_keywords
 import torch
@@ -109,16 +39,6 @@ from nltk.corpus import stopwords
 from sentence_transformers import SentenceTransformer
 
 
-
-"""
-
-TO DO:
-- get model to cite which passages it was most instructed by
-- NLI on those passages only - score accordingly
-- move results to the data folder (what's common practise with this?) # i think i've already done this 
-
-
-"""
 
 
 # -------------------------
@@ -192,7 +112,9 @@ MAX_RETRIEVED_PASSAGES = 5  # max passages to retrieve per query
 
 
 def free_gpu_memory():
-    """Clear CUDA cache and run garbage collection."""
+    """
+
+    """
     torch.cuda.empty_cache()
     gc.collect()
 
@@ -205,7 +127,9 @@ def free_gpu_memory():
 
 
 def load_faiss_index(path):
-    """Load a FAISS index from ``path``."""
+    """
+
+    """
     index = faiss.read_index(path)
     print(f"[FAISS] Loaded {index.ntotal} vectors from {path}")
     return index
@@ -213,13 +137,12 @@ def load_faiss_index(path):
 
 
 def faiss_search_topk(
-        query_emb: np.ndarray, 
+        query_emb, 
         index, 
-        top_k: int = 50
+        top_k = 50
         ):
     """
 
-    Retrieve ``top_k`` most similar items from a FAISS index.
     
     """
     query_emb = np.ascontiguousarray(query_emb, dtype=np.float32)
@@ -249,61 +172,60 @@ def jaccard_similarity(set1, set2):
 
 
 def retrieve_passages(
-    query_vec: np.ndarray,
-    query_keywords: Set[str],
-    metadata: List[Dict],
+    query_vec,
+    query_keywords,
+    metadata,
     index,
-    top_k: int,
-    alpha: float = DEFAULT_HYBRID_ALPHA,
+    top_k,
+    alpha = DEFAULT_HYBRID_ALPHA,
     *,
-    keyword_field: str | None = None,
-    filter_fn: Callable[[int], bool] | None = None,
+    keyword_field,
+    get_keywords_fn,
+    filter_fn,
 ):
     """
-    Retrieve top dense candidates and rerank them by Jaccard overlap.
 
 
     """
-
     if keyword_field is None and metadata:
         keyword_field = "keywords"
 
     query_vec = query_vec.reshape(1, -1)
-
-    # Dense retrieval via FAISS
     faiss_idxs, faiss_scores = faiss_search_topk(query_vec, index, top_k=top_k)
     n_meta = len(metadata)
+
     valid_pairs = [
         (int(idx), float(score))
         for idx, score in zip(faiss_idxs, faiss_scores)
         if idx != -1 and 0 <= int(idx) < n_meta
     ]
 
-    # Keep only valid dense candidates and optionally filter them
+    # Optionally filter candidates
     candidate_idxs = [idx for idx, _ in valid_pairs]
     if filter_fn is not None:
         candidate_idxs = [i for i in candidate_idxs if filter_fn(i)]
 
     faiss_dict = {idx: score for idx, score in valid_pairs if idx in candidate_idxs}
+    results = []
 
-    results: List[Dict[str, float]] = []
     for idx in candidate_idxs:
         sim_cos = faiss_dict[idx]
-        if query_keywords:
-            sim_jac = jaccard_similarity(
-                query_keywords, set(metadata[idx].get(keyword_field, []))
-            )
+
+        # Get keywords
+        if get_keywords_fn is not None:
+            passage_keywords = get_keywords_fn(idx)
         else:
-            sim_jac = 0.0
+            passage_keywords = set(metadata[idx].get(keyword_field, []))
+
+        sim_jac = jaccard_similarity(query_keywords, passage_keywords) if query_keywords else 0.0
         sim_hybrid = alpha * sim_cos + (1.0 - alpha) * sim_jac
-        results.append(
-            {
-                "idx": idx,
-                "sim_cos": float(sim_cos,),
-                "sim_jac": float(sim_jac),
-                "sim_hybrid": float(sim_hybrid)
-            }
-        )
+
+        results.append({
+            "idx": idx,
+            "sim_cos": float(sim_cos),
+            "sim_jac": float(sim_jac),
+            "sim_hybrid": float(sim_hybrid)
+        })
 
     results.sort(key=lambda x: x["sim_hybrid"], reverse=True)
     return results[:top_k]
@@ -321,10 +243,16 @@ def retrieve_passages(
 
 
 
-def fill_prompt(template_path, query, passages, max_passages=MAX_RETRIEVED_PASSAGES):
+
+def fill_prompt(
+        template_path, 
+        query, 
+        passages, 
+        max_passages=MAX_RETRIEVED_PASSAGES
+        ):
     """
-    Load a prompt template and fill in placeholders with passages and query.
-    Expects placeholders: {passage_1} ... {passage_N}, {query}.
+
+    
     """
     # Load template
     with open(template_path, "r", encoding="utf-8") as f:
@@ -340,11 +268,10 @@ def fill_prompt(template_path, query, passages, max_passages=MAX_RETRIEVED_PASSA
 
 
 
-def parse_llm_json(output_str: str) -> dict:
+def parse_llm_json(output_str):
     """
-    Robust JSON parser for LLM outputs.
-    Returns a dict with: answer, confidence, cited_passages.
-    Also returns cleaned text and any parsing error for debugging.
+
+    
     """
     cleaned = re.sub(r"```(?:json)?\s*(.*?)```", r"\1", output_str, flags=re.DOTALL).strip()
     parsed = {"answer": "", "confidence": 0.0, "cited_passages": []}
@@ -385,14 +312,20 @@ def parse_llm_json(output_str: str) -> dict:
 
 
 
-def generate_answer(model, tokenizer, query, passages, gen_params, prompt_path=ANSWER_PROMPT):
+def generate_answer(
+        model, 
+        tokenizer, 
+        query, 
+        passages, 
+        gen_params, 
+        prompt_path=ANSWER_PROMPT
+        ):
     prompt = fill_prompt(prompt_path, query, passages)
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True).to(model.device)
 
     outputs = model.generate(
         **inputs,
         **gen_params,
-        return_dict_in_generate=True
     )
     sequence = outputs.sequences[0]
     raw_text = tokenizer.decode(sequence, skip_special_tokens=True)
@@ -419,51 +352,67 @@ def generate_answer(model, tokenizer, query, passages, gen_params, prompt_path=A
 
 
 
-def rerank_answers(
-        candidates, 
-        passages, 
-        embed_model, 
-        score_NLI_result
+
+
+
+
+
+
+
+def score_NLI_fn(
+        answer, 
+        passage, 
+        reward_scheme
         ):
     """
-    for DPO, and multi-answer RLHF
 
-    Rerank multiple candidate answers based on grounding signals.
     
-    Args:
-        candidates (list of dict): Each must contain
-            {
-                "answer": str,
-                "confidence": float,
-                "cited_passages": list[int]
-            }
-        passages (list of str): Retrieved passages (1-based indices).
-        embed_model: Embedding model with encode() -> np.array
-        score_NLI_result: function(answer: str, passage: str) -> {"entailment": float, "neutral": float, "contradiction": float}
-    
-    Returns:
-        dict: Best candidate (same schema as input).
     """
+    inputs = tokenizer_nli(passage, answer, return_tensors="pt", truncation=True).to("cuda")
+    with torch.no_grad():
+        logits = model_nli(**inputs).logits
+        pred_class = torch.argmax(torch.softmax(logits, dim=-1), dim=-1).item()
+
+    mnli_labels = ["contradiction", "neutral", "entailment"]
+    label = mnli_labels[pred_class]
+
+    nli_rewards = reward_scheme.get("nli", {"entailment": 0.5, "neutral": -0.2, "contradiction": -1.0})
+    return {
+        "entailment": nli_rewards.get("entailment", 0.5) if label == "entailment" else 0.0,
+        "neutral": nli_rewards.get("neutral", -0.2) if label == "neutral" else 0.0,
+        "contradiction": nli_rewards.get("contradiction", -1.0) if label == "contradiction" else 0.0,
+    }
+
+
+def rerank_answers(
+    candidates,
+    passages,
+    embed_model,
+    reward_scheme
+):
+    """
+
     
+    """
     scores = []
+
     for cand in candidates:
         answer = cand["answer"].strip()
         cited = cand.get("cited_passages", [])
         conf = cand.get("confidence", 0.0)
 
-        # If answer is IDK, rank lower unless all fail
+        # Deprioritize IDK unless all fail
         if answer.lower() in ["i don't know", "idk"]:
-            scores.append((-1.0, cand))  # always deprioritize IDK
+            scores.append((-1.0, cand))
             continue
 
-        # Collect grounding evidence
         entail_scores, sim_scores = [], []
         for idx in cited:
-            if 1 <= idx <= len(passages):
-                passage = passages[idx - 1]
+            if 0 <= idx < len(passages):
+                passage = passages[idx]
 
                 # NLI scoring
-                nli = score_NLI_result(answer, passage)
+                nli = score_NLI_fn(answer, passage, reward_scheme)
                 entail_scores.append(nli.get("entailment", 0.0) - nli.get("contradiction", 0.0))
 
                 # Semantic similarity
@@ -472,19 +421,12 @@ def rerank_answers(
                 sim = cosine_similarity(ans_emb, pas_emb)[0][0]
                 sim_scores.append(sim)
 
-        # Aggregate scores
         mean_entail = np.mean(entail_scores) if entail_scores else 0.0
         mean_sim = np.mean(sim_scores) if sim_scores else 0.0
 
-        # Weighted rerank score
-        rerank_score = (
-            0.5 * mean_entail +
-            0.3 * mean_sim +
-            0.2 * conf
-        )
+        rerank_score = 0.5 * mean_entail + 0.3 * mean_sim + 0.2 * conf
         scores.append((rerank_score, cand))
 
-    # Choose best
     best = max(scores, key=lambda x: x[0])[1]
     return best
 
@@ -509,18 +451,13 @@ def rerank_answers(
 
 
 
-def NLI_check_answer_per_passage(answer, passages, reward_scheme):
+def NLI_check_answer_per_passage(
+        answer, 
+        passages, 
+        reward_scheme
+        ):
     """
-    Perform NLI/entailment check between the model-generated answer and each retrieved passage.
-    Returns a list of numeric scores per passage based on reward_scheme['nli'].
 
-    Args:
-        answer (str): generated answer
-        passages (list[str]): list of retrieved passages (premises)
-        reward_scheme (dict): reward scheme containing "nli" mapping
-
-    Returns:
-        List[float]: numeric scores for each passage
     """
     nli_rewards = reward_scheme.get("nli", {"entailment": 0.5, "neutral": -0.2, "contradiction": -1.0})
     scores = []
@@ -540,13 +477,10 @@ def NLI_check_answer_per_passage(answer, passages, reward_scheme):
 
 
 
-def normalise_for_em(s: str): # what is s in this case? the output???
+def normalise_for_em(s): # what is s in this case? the output???
     """
-    Normalize an answer for EM/F1 calculation:
-    - Lowercase
-    - Remove punctuation
-    - Remove articles ('a', 'an', 'the')
-    - Collapse multiple whitespaces
+
+    
     """
     s = s.lower()  # lowercase
     s = re.sub(r'\b(a|an|the)\b', ' ', s)  # remove articles
@@ -561,7 +495,7 @@ def compute_em(
         gold_answer
         ):
     """
-    EM is 1 if normalized prediction == normalized gold, else 0.
+
     """
     return int(normalise_for_em(prediction) == normalise_for_em(gold_answer))
 
@@ -572,7 +506,7 @@ def compute_f1(
         gold_answer
         ):
     """
-    Compute token-level F1 between prediction and gold after normalization.
+
     """
     pred_tokens = normalise_for_em(prediction).split() #### what's the pred + gold tokens????
     gold_tokens = normalise_for_em(gold_answer).split()
@@ -626,11 +560,12 @@ def compute_total_reward(
     retrieved_texts,
     gold_passage_ids,
     reward_scheme,
-    correctness="hybrid",
-    scale_idk_penalty=True,
-    use_confidence=True,
-    multi_answers=None,       # list of other answers for agreement
-    NLI_score_passages="retrieved"  # "retrieved" | "cited" | "None"
+    correctness = "hybrid",
+    *,
+    scale_idk_penalty = True,
+    use_confidence = True,
+    multi_answers,
+    NLI_score_passages = "retrieved"  # "retrieved" | "cited" | "none" ################## is this updated according to the configs???
 ):
     reward = 0
     is_idk = answer_info.get("idk", False)
@@ -661,7 +596,6 @@ def compute_total_reward(
     # --- Answer correctness ---
     em_score = compute_em(answer_info["answer"], gold_answer)
     f1_score = compute_f1(answer_info["answer"], gold_answer)
-
     if correctness == "hybrid":
         correctness_score = 0.5 * em_score + 0.5 * f1_score
     elif correctness == "F1":
@@ -675,19 +609,21 @@ def compute_total_reward(
         reward += reward_scheme["answer"]["incorrect_answer"]
 
     # --- NLI reward ---
-    if NLI_score_passages == "retrieved":
+    if NLI_score_passages.lower() == "retrieved":
         nli_targets = retrieved_texts
-    elif NLI_score_passages == "cited":
+    elif NLI_score_passages.lower() == "cited":
         nli_targets = cited_texts
-    else:  # "None"
+    else:
         nli_targets = []
 
     if nli_targets:
-        nli_scores = NLI_check_answer_per_passage(answer_info["answer"], nli_targets, reward_scheme)
-        reward += float(np.mean(nli_scores))
+        nli_scores = [score_NLI_fn(answer_info["answer"], p, reward_scheme) for p in nli_targets]
+        entail_scores = [n.get("entailment", 0.0) - n.get("contradiction", 0.0) for n in nli_scores]
+        mean_entail = np.mean(entail_scores)
+        reward += mean_entail
         if use_confidence:
             conf = float(answer_info.get("confidence", 0.5))
-            reward += conf * np.mean(nli_scores)
+            reward += conf * mean_entail
 
     # --- Multi-answer agreement ---
     if multi_answers is not None and len(multi_answers) > 1:
@@ -719,68 +655,82 @@ def run_rag_pipeline(
     model_name,
     model,
     tokenizer,
-    queries: List[Dict],
-    passage_metadata: List[Dict],
+    queries,
+    passage_metadata,
     passage_index,
     embed_model,
     gen_params,
     reward_scheme,
-    SEEDS=[1, 2, 3],
-    top_k: int = MAX_RETRIEVED_PASSAGES,
-    alpha: float = DEFAULT_HYBRID_ALPHA,
-    scale_idk_penalty: bool = True,
-    score_NLI_result: bool = True,
-    use_confidence: bool = True,
-    out_path: str = None,
-    debug_path: str = None,
+    SEEDS=[1, 2, 3], ########### isn't this defined in configs???
+    top_k = MAX_RETRIEVED_PASSAGES,
+    alpha = DEFAULT_HYBRID_ALPHA, 
+    scale_idk_penalty = True,
+    score_NLI_result = True,
+    use_confidence = True,
+    NLI_score_passages = "retrieved",
+    *,
+    out_path,
+    debug_path,
+    out_path_dpo, 
 ):
     """
-    Full RAG workflow with multi-answer generation and agreement rewards.
-    Supports RLHF, PPO, DPO seamlessly.
+
+    
     """
+    sparse_path = dataset_rep_paths(dataset, split)["passages_sparse_jsonl"]
+    with open(sparse_path, "r", encoding="utf-8") as f:
+            sparse_passages = [json.loads(line) for line in f]
 
-    for qdata in tqdm(queries, desc="Processing queries", unit="query"):
-        query_text = qdata["question"]
-        query_id = qdata.get("question_id", None)
-        gold_passage_ids = qdata.get("gold_passages", [])
-        gold_answer = qdata.get("gold_answer", "")
+    # Map passage_id -> keywords
+    id_to_keywords = {p["passage_id"]: set(p.get("keywords", [])) for p in sparse_passages}
 
-        query_keywords = set(extract_keywords(
-        query_text,
-        include_ngrams=True,
-        n_max=3,
-        remove_numbers=True
-    ))
-        
-        query_for_embedding = clean_text(query_text)
-        # Embed query
-        query_emb = embed_model.encode(
-            [query_for_embedding],
-            normalize_embeddings=True,
-            convert_to_numpy=True
-        )[0]
-        #query_keywords = set(extract_keywords(query_text))
+    for seed in SEEDS:
 
-        if passage_metadata and "keywords" not in passage_metadata[0]:
-            print("[warn] passage_metadata has no 'keywords' field — Jaccard will be 0 unless you add them.")
+        torch.manual_seed(seed)
+        random.seed(seed)
+        np.random.seed(seed)
+
+        reward_name = rc.get("name", f"reward_config_{rc_idx+1}")
+        #paths = dataset_results_paths(dataset, split, model_name, reward_name, seed)
+
+        for qdata in tqdm(queries, desc="Processing queries", unit="query"):
+            query_text = qdata["question"]
+            query_id = qdata.get("question_id", None)
+            gold_passage_ids = qdata.get("gold_passages", [])
+            gold_answer = qdata.get("gold_answer", "")
+
+            query_keywords = set(extract_keywords(
+            query_text,
+        ))
+            
+            query_for_embedding = clean_text(query_text)
+            # Embed query
+            query_emb = embed_model.encode(
+                [query_for_embedding],
+                normalize_embeddings=True,
+                convert_to_numpy=True
+            )[0]
 
 
-        # Retrieve passages
-        retrieved_info = retrieve_passages(
-            query_vec=query_emb,
-            query_keywords=query_keywords,
-            metadata=passage_metadata,
-            index=passage_index,
-            top_k=top_k,
-            alpha=alpha
-        )
-        retrieved_ids = [passage_metadata[r["idx"]]["passage_id"] for r in retrieved_info]
-        retrieved_texts = [passage_metadata[r["idx"]]["text"] for r in retrieved_info]
 
-        for seed in SEEDS:
-            torch.manual_seed(seed)
-            random.seed(seed)
-            np.random.seed(seed)
+            # Define function for retrieval
+            def get_keywords(pid):
+                pid_str = passage_metadata[pid]["passage_id"]
+                return id_to_keywords.get(pid_str, set())
+
+            retrieved_info = retrieve_passages(
+                query_vec=query_emb,
+                query_keywords=query_keywords,
+                metadata=passage_metadata,
+                index=passage_index,
+                top_k=top_k,
+                alpha=alpha,
+                get_keywords_fn=get_keywords
+            )
+
+            retrieved_ids = [passage_metadata[r["idx"]]["passage_id"] for r in retrieved_info]
+            retrieved_texts = [passage_metadata[r["idx"]]["text"] for r in retrieved_info]
+
 
             # --- Multi-answer generation ---
             candidates = []
@@ -792,47 +742,45 @@ def run_rag_pipeline(
             # Collect all answers for agreement reward
             multi_answers = [c["answer"].strip() for c in candidates]
 
-
-
-
-            # Save multi-answer debug info
-            if debug_path:
-                debug_entry = {
-                    "question_id": query_id,
-                    "query": query_text,
-                    "answers": multi_answers,
-                    "cited_passages": [c["cited_passages"] for c in candidates],
-                    "seeds": [c["seed"] for c in candidates],
-                }
-                append_jsonl(debug_path, debug_entry)
-
-
-
-
-
-
             # --- Rerank candidates ---
-            final_answer = rerank_answers(candidates, retrieved_texts, embed_model, score_NLI_result)
+            final_answer = rerank_answers(candidates, retrieved_texts, embed_model, reward_scheme)
 
-            # Map cited indices to texts & IDs
-            cited_idxs = final_answer.get("cited_passages", list(range(len(retrieved_texts))))
-            cited_texts = [retrieved_texts[i] for i in cited_idxs if 0 <= i < len(retrieved_texts)]
-            cited_ids = [retrieved_ids[i] for i in cited_idxs if 0 <= i < len(retrieved_ids)]
+            preferences = [(final_answer, cand) for cand in candidates if cand != final_answer]
 
-            # --- Reward computation (with per-passage NLI and agreement) ---
-            reward = compute_total_reward(
-                final_answer,
-                gold_answer,
-                retrieved_ids,
-                retrieved_texts,
-                gold_passage_ids,
-                reward_scheme,
-                correctness="hybrid",
-                scale_idk_penalty=rc["scale_idk_penalty"],
-                use_confidence=rc["use_confidence"],
-                multi_answers=multi_answers,
-                NLI_score_passages=rc["NLI_score_passages"]
-)
+
+            # --- Compute rewards and save scaled version ---
+            for c in candidates:
+                # Compute raw reward
+                raw_reward = compute_total_reward(
+                    c,
+                    gold_answer,
+                    retrieved_ids,
+                    retrieved_texts,
+                    gold_passage_ids,
+                    reward_scheme,
+                    correctness="hybrid",
+                    scale_idk_penalty=scale_idk_penalty,
+                    use_confidence=use_confidence,
+                    multi_answers=multi_answers,
+                    NLI_score_passages=NLI_score_passages
+                )
+
+                # Save raw and scaled reward
+                c["reward"] = raw_reward
+                c["reward_scaled"] = np.tanh(raw_reward)  # keeps reward in [-1, 1]
+
+            # --- Build DPO preference pairs ---
+            preferences = [(final_answer, cand) for cand in candidates if cand != final_answer]
+
+            if out_path_dpo:
+                for chosen, rejected in preferences:
+                    append_jsonl(out_path_dpo, {
+                        "query": query_text,
+                        "chosen": chosen["answer"],
+                        "rejected": rejected["answer"],
+                        "chosen_reward_scaled": chosen.get("reward_scaled", chosen.get("reward", 0.0)),
+                        "rejected_reward_scaled": rejected.get("reward_scaled", rejected.get("reward", 0.0))
+                    })
 
             # --- Save final result per seed ---
             if out_path:
@@ -840,18 +788,40 @@ def run_rag_pipeline(
                     "question_id": query_id,
                     "query": query_text,
                     "gold_answer": gold_answer,
-                    "answer": final_answer["answer"],
-                    "idk": final_answer.get("idk", False),
-                    "confidence": final_answer.get("self_conf", 0.0),
+                    "final_answer": final_answer["answer"],
+                    "final_confidence": final_answer.get("self_conf", 0.0),
+                    "final_idk": final_answer.get("idk", False),
+                    "final_cited_passages": [retrieved_texts[i] for i in final_answer.get("cited_passages", []) if 0 <= i < len(retrieved_texts)],
+                    "final_cited_ids": [retrieved_ids[i] for i in final_answer.get("cited_passages", []) if 0 <= i < len(retrieved_ids)],
+                    "seed": seed,
                     "retrieved_texts": retrieved_texts,
                     "retrieved_ids": retrieved_ids,
-                    "cited_texts": cited_texts,
-                    "cited_ids": cited_ids,
-                    "reward": reward,
-                    "seed": seed,
-                    "multi_answers": multi_answers
+                    "answers": [
+                        {
+                            "answer": c["answer"],
+                            "idk": c.get("idk", False),
+                            "confidence": c.get("self_conf", 0.0),
+                            "cited_texts": [retrieved_texts[i] for i in c.get("cited_passages", []) if 0 <= i < len(retrieved_texts)],
+                            "cited_ids": [retrieved_ids[i] for i in c.get("cited_passages", []) if 0 <= i < len(retrieved_ids)],
+                            "reward": c["reward"],
+                            "reward_scaled": c["reward_scaled"]
+                        }
+                        for c in candidates
+                    ]
+
                 }
                 append_jsonl(out_path, result_entry)
+
+
+                                # Save multi-answer debug info
+                if debug_path:
+                    debug_entry = {
+                        "question_id": query_id,
+                        "query": query_text,
+                        "answers": result_entry["answers"],
+                        "seed": seed
+                    }
+                    append_jsonl(debug_path, debug_entry)
 
 
 
@@ -894,34 +864,42 @@ if __name__ == "__main__":
                 enable_offload = True if model_name == "14B" else False
                 tokenizer, model = load_model_8bit(model_path, enable_fp32_cpu_offload=enable_offload)  
 
-                for rc_idx, rc in enumerate(reward_configs):
-                    print(f"\nReward config {rc_idx + 1}: {rc}")
+                for config_name, config_list in reward_configs.items():  # RLHF, PPO, DPO
+                    for rc_idx, rc in enumerate(config_list):
+                        print(f"\nReward config {config_name} #{rc_idx + 1}: {rc}")
 
-                    out_path = f"data/results/{dataset}/{split}/{model_name}/reward_config_{rc_idx+1}/results.jsonl"
-                    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                        # Build proper folder structure: <RLHF|PPO|DPO>/<reward_config_#>
+                        out_folder = f"data/results/{dataset}/{split}/{model_name}/{config_name}/reward_config_{rc_idx+1}"
+                        os.makedirs(out_folder, exist_ok=True)
 
-                    debug_path = f"data/results/{dataset}/{split}/{model_name}/reward_config_{rc_idx+1}/debug.jsonl"
-                    os.makedirs(os.path.dirname(debug_path), exist_ok=True)
-                    
-                    # Run pipeline (streaming per query)
-                    run_rag_pipeline(
-                        model=model,
-                        tokenizer=tokenizer,
-                        queries=queries,
-                        passage_metadata=passage_metadata,
-                        passage_index=passage_index,
-                        embed_model=embed_model,
-                        gen_params=gen_params,
-                        out_path=out_path,
-                        debug_path=debug_path,
-                        top_k=MAX_RETRIEVED_PASSAGES,
-                        alpha=DEFAULT_HYBRID_ALPHA,
-                        scale_idk_penalty=rc["scale_idk_penalty"],
-                        score_NLI_result=rc["score_NLI_result"],
-                        use_confidence=rc["use_confidence"]
-                    )
+                        out_path = f"{out_folder}/results.jsonl"
+                        debug_path = f"{out_folder}/debug.jsonl"
 
-                    print(f"Results being appended to {out_path} as they are generated.")
+
+                        # Run pipeline (streaming per query)
+                        run_rag_pipeline(
+                            dataset=dataset,
+                            split=split,
+                            model_name=model_name,
+                            model=model,
+                            tokenizer=tokenizer,
+                            queries=queries,
+                            passage_metadata=passage_metadata,
+                            passage_index=passage_index,
+                            embed_model=embed_model,
+                            gen_params=gen_params,
+                            reward_scheme=reward_scheme,
+                            out_path=out_path,
+                            debug_path=debug_path,
+                            top_k=MAX_RETRIEVED_PASSAGES,
+                            alpha=DEFAULT_HYBRID_ALPHA,
+                            scale_idk_penalty=rc["scale_idk_penalty"],
+                            use_confidence=rc["use_confidence"],
+                            NLI_score_passages=rc["NLI_score_passages"]  # just a string now
+                        )
+
+                        print(f"Results being appended to {out_path} as they are generated.")
+
 
                 # Free model GPU memory
                 del model  

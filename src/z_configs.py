@@ -150,15 +150,13 @@ reward_scheme = {
 
 # Generation parameters
 gen_params = {
-    "max_new_tokens": 254, # "max_length": 512, # MAX_NEW_TOKENS just for generation tokens, while max_length includes prompt length
-
-    "temperature": 0.7, ############# ADJUST ACCORDING TO THE MODEL I USE
-
-    "top_p": 0.95, # cumulative probability threshold # I NEED TO LOOK INTO NUCLEUS SAMPLING
-    "top_k": 40, # take only 50 highest-prob tokens for sampling
-
-    "do_sample": True, # samples from distribution, instead of taking just the most likely token #### can be used to capture model uncertainty???
-
-    "num_return_sequences": 3, # sample multiple answers 
-    "repetition_penalty": 1.1 # penalise repeating same token sequences
+    "max_new_tokens": 254,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 40,
+    "do_sample": True,
+    "num_return_sequences": 3,
+    "repetition_penalty": 1.1,
+    "output_scores": True,            # return token logits
+    "return_dict_in_generate": True   # return a dict instead of raw tensor
 }

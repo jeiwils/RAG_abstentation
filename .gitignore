@@ -3,6 +3,7 @@
 
 # Except these folders
 !src/
+!src/** 
 !data/processed_datasets/
 !data/prompts/
 !data/reward_scheme/

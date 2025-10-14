@@ -14,7 +14,8 @@ cd C:/Users/jeiwi/Data_projects/RAG_abstentation
 
 """
 
-
+from collections import Counter
+import math
 import numpy as np
 import re
 import json
@@ -222,6 +223,9 @@ def build_and_save_faiss_index(
 """         SPARSE       """ 
 
 
+# gets noun chunks - makes ngrams according to named entities - filters according to tf-idf 
+
+
 ALIAS = {
     "us": "united_states", "u_s": "united_states", "u_s_a": "united_states",
     "united_states_of_america": "united_states", "the_united_states": "united_states",
@@ -233,14 +237,31 @@ ALIAS = {
 }
 
 NOISE_PATTERNS = [
-    re.compile(r"^\d{4}$"),          # years
+    #re.compile(r"^\d{4}$"),          # years
     re.compile(r"^\d+$"),            # pure numbers
     re.compile(r"^(one|two|three|four|five|six|seven|eight|nine|ten|first|second|third)$")
 ]
 
-ALLOWED_POS = {"NOUN", "PROPN", "ADJ"}  
+KEEP_ENTS = {"PERSON", "ORG", "GPE", "LOC", "FAC", "PRODUCT", "WORK_OF_ART", "EVENT", "LAW", "DATE"} 
 
-KEEP_ENTS = {"PERSON", "ORG", "GPE", "LOC", "FAC", "PRODUCT", "WORK_OF_ART", "EVENT", "LAW"} 
+
+
+
+def compute_tfidf_stats(all_passages, min_df=2):
+    """
+    Compute DF counts and IDF values across passages.
+    Returns: dict {term: idf}
+    """
+    df_counter = Counter()
+    N = len(all_passages)
+    for passage in all_passages:
+        kws = set(extract_keywords(passage["text"]))
+        df_counter.update(kws)
+
+    idf = {kw: math.log(N / df) for kw, df in df_counter.items() if df >= min_df}
+    return idf
+
+
 
 def filter_keyword(
         kw, 
@@ -261,85 +282,42 @@ def filter_keyword(
                 return None
     return kw
 
-def generate_ngrams(
-        tokens, 
-        ngram_length=3
-        ):
-    """
-
-    ##################################################################
-
-    """
-    ngrams = set()
-    n_tokens = len(tokens)
-    for n in range(2, ngram_length+1):  # start at bigrams
-        for i in range(n_tokens - n + 1):
-            gram_tokens = tokens[i:i+n]
-            phrase = "_".join([t.text.lower() for t in gram_tokens])
-            ngrams.add(phrase)
-    return ngrams
-
 
 def extract_keywords(
-        text,
-        include_ngrams=False,
-        ngram_length=2,
-        remove_numbers=True
-    ):
-    """
-
-    ##################################################################
-
-    """
-
+        text, 
+        remove_numbers=False, 
+        ngram_length=3,
+        idf_dict=None,
+        min_idf=0.5
+):
     if not text:
         return []
 
     doc = nlp(text)
     out = set()
 
-    # --- Named entities
-    for ent in doc.ents:
-        if ent.label_ in KEEP_ENTS and ent.text.strip():
-            norm = normalise_text(ent.text)
-            canon = filter_keyword(norm, remove_numbers=remove_numbers)
-            if canon:
-                out.add(canon)
+    ner_spans = [ent for ent in doc.ents if ent.label_ in KEEP_ENTS and ent.text.strip()]
 
-    # --- Noun chunks
     for chunk in doc.noun_chunks:
-        phrase_tokens = [
-            t.lemma_.lower()
-            for t in chunk
-            if (
-                not t.is_stop
-                and t.is_alpha
-                and len(t.text) > 1
-            )
-        ]
-        if len(phrase_tokens) >= 2:
-            phrase = "_".join(phrase_tokens)
-            canon = filter_keyword(phrase, remove_numbers=remove_numbers)
-            if canon:
-                out.add(canon)
+        if not any(chunk.start < ent.end and chunk.end > ent.start for ent in ner_spans):
+            continue
 
-    # --- Optional: n-grams
-    if include_ngrams:
-        tokens = [
-            t for t in doc
-            if (
-                not t.is_stop
-                and not t.is_space
-                and t.pos_ in ALLOWED_POS 
-                and t.is_alpha
-                and len(t.text) > 1
-            )
-        ]
-        ngrams = generate_ngrams(tokens, ngram_length=ngram_length)
-        for gram in ngrams:
-            canon = filter_keyword(gram, remove_numbers=remove_numbers)
-            if canon:
-                out.add(canon)
+        tokens = [t.lemma_.lower() for t in chunk if t.is_alpha and not t.is_stop]
+        n_tokens = len(tokens)
+        if n_tokens == 0:
+            continue
+
+        for n in range(1, min(ngram_length, n_tokens) + 1):
+            for i in range(n_tokens - n + 1):
+                gram_tokens = tokens[i:i+n]
+                phrase = "_".join(gram_tokens)
+                canon = filter_keyword(phrase, remove_numbers=remove_numbers)
+                if canon:
+                    if idf_dict and canon in idf_dict:
+                        if idf_dict[canon] >= min_idf:  # keep only high-IDF terms
+                            out.add(canon)
+                    else:
+                        out.add(canon)
 
     return sorted(out)
 
@@ -348,6 +326,7 @@ def extract_keywords(
 
 
 
+"""         BATCH PROCESSING       """
 
 
 
@@ -360,7 +339,8 @@ def process_batch(
         bge_model, 
         embeddings_all, 
         vec_offset, 
-        sparse_dir 
+        sparse_dir,
+        idf_dict=None,
         ):
     """
     
@@ -383,7 +363,11 @@ def process_batch(
 
     # Sparse keyword extraction
     for i, ent in enumerate(batch_entries):
-        ent["keywords"] = extract_keywords(batch_texts[i])
+        ent["keywords"] = extract_keywords(
+            batch_texts[i],
+            idf_dict=idf_dict,
+            remove_numbers=True
+        )
         ent["vec_id"] = vec_offset
         vec_offset += 1
         sparse_dir.write(json.dumps(ent, ensure_ascii=False) + "\n")
@@ -472,6 +456,8 @@ if __name__ == "__main__":
                     dataset_dir = os.path.dirname(passages_jsonl)
 
                     all_passages = list(load_jsonl(passages_jsonl_src))
+                    # Compute TF-IDF scores for filtering
+                    idf_dict = compute_tfidf_stats(all_passages, min_df=2)
                     done_ids, _ = compute_resume_sets(
                         resume=RESUME,
                         out_path=passages_jsonl,
@@ -503,13 +489,13 @@ if __name__ == "__main__":
 
                             if len(batch_texts) >= BATCH_SIZE:
                                 embeddings_all, vec_offset = process_batch(
-                                    batch_texts, batch_entries, bge_model, embeddings_all, vec_offset, f_sparse
+                                    batch_texts, batch_entries, bge_model, embeddings_all, vec_offset, f_sparse, idf_dict=idf_dict
                                 )
                                 batch_texts, batch_entries = [], []
 
                         # Process any remaining batch
                         embeddings_all, vec_offset = process_batch(
-                            batch_texts, batch_entries, bge_model, embeddings_all, vec_offset, f_sparse
+                            batch_texts, batch_entries, bge_model, embeddings_all, vec_offset, f_sparse, idf_dict=idf_dict
                         )
 
                     np.save(passages_npy, embeddings_all)

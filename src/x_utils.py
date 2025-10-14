@@ -63,21 +63,19 @@ def dataset_rep_paths(dataset, split):
 
 
 
-def dataset_results_paths(dataset, split, model_name, reward_config):
-    """
-    Return paths for storing RLHF results, logs, and updated models for a specific dataset/split/model/reward config.
-    
-    Directory structure:
-    data/results/{dataset}/{split}/{model_name}/{reward_config}/
-    """
-    base = os.path.join("data", "results", dataset, split, model_name, reward_config)
+def dataset_results_paths(dataset, split, model_name, reward_scheme, seed, paradigm=None):
+    parts = ["data", "results", dataset, split, model_name]
+    if paradigm:
+        parts.append(paradigm)
+    parts.append(reward_scheme)
+    parts.append(f"seed_{seed}")
+    base = os.path.join(*parts)
     os.makedirs(base, exist_ok=True)
-    
     return {
         "base": base,
-        "updated_model_dir": os.path.join(base, "model_rlhf_updated"),
-        "log_file": os.path.join(base, "training.log"),
-        "jsonl_path": os.path.join(base, "answers_with_rewards.jsonl"),
+        "answers": os.path.join(base, "answers.jsonl"),
+        "debug": os.path.join(base, "debug.jsonl"),
+        "log": os.path.join(base, "training.log"),
     }
 
 
