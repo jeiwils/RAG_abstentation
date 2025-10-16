@@ -6,39 +6,32 @@ cd C:/Users/jeiwi/Data_projects/RAG_abstentation
 
 
 
+TO DO:
+- add debugging for text cleaning (see both raw and cleaned text)
+- make reward logic into a class 
+- should load_faiss_index, faiss_search_topk, jaccard_similarity, and retrieve_passages be in datasets_representations? 
+
+
+
 """
 
 
 
 
-
-
-
-
-
 from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
-import gc
-import time
-import random 
-import os
-from typing import List, Dict, Set, Callable, Counter
+from typing import  Counter
 import faiss
-import re
-import string
 from tqdm import tqdm
 import json
-from .x_utils import load_jsonl, save_jsonl, append_jsonl, load_model_8bit, dataset_results_paths, clean_text, dataset_rep_paths
-from .z_configs import SEEDS, reward_configs, reward_scheme, gen_params
-from .a_datasets_representations import extract_keywords
 import torch
 import random
 import numpy as np
-from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer
-from nltk.corpus import stopwords
-from sentence_transformers import SentenceTransformer
 
 
+from .z2_models import NLIModel, EmbedModel, LLMModel
+from .x_utils import load_jsonl, append_jsonl, load_model_8bit, dataset_results_paths, clean_text, dataset_rep_paths, parse_llm_json, normalise_string 
+from .z_configs import SEEDS, reward_configs, reward_scheme, gen_params
+from .a_datasets_representations import extract_keywords
 
 
 # -------------------------
@@ -47,7 +40,7 @@ from sentence_transformers import SentenceTransformer
 
 """             MODULE RUNNING PARAMS       """
 
-datasets = ["musique", "hotpotqa", "2wikimultihopqa"]
+datasets = ["hotpotqa", "2wikimultihopqa"] #["musique", 
 splits = ["train"] # ["train", "dev"]
 
 MAX_QUERIES = 10
@@ -64,24 +57,13 @@ ANSWER_PROMPT = "data/prompts/answer_prompt2.txt"
 
 
 
-
-
-
-
-
-
 """             MODEL STUFF             """
 
 
-tokenizer_nli = AutoTokenizer.from_pretrained("roberta-large-mnli")
-model_nli = AutoModelForSequenceClassification.from_pretrained("roberta-large-mnli").to("cuda")
-model_nli.eval()
 
 
-embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-
-
-
+nli_model = NLIModel("roberta-large-mnli", device="cuda")
+embed_model = EmbedModel("all-MiniLM-L6-v2")
 
 
 
@@ -103,23 +85,6 @@ MAX_RETRIEVED_PASSAGES = 5  # max passages to retrieve per query
 # -------------------------
 # Utility Functions
 # -------------------------
-
-
-
-
-
-
-
-
-def free_gpu_memory():
-    """
-
-    """
-    torch.cuda.empty_cache()
-    gc.collect()
-
-
-
 
 
 
@@ -148,8 +113,8 @@ def faiss_search_topk(
     query_emb = np.ascontiguousarray(query_emb, dtype=np.float32)
     if query_emb.ndim == 1:
         query_emb = query_emb.reshape(1, -1)
-    norm = np.linalg.norm(query_emb) ###############################
-    if not np.isfinite(norm) or norm == 0: ############################
+    norm = np.linalg.norm(query_emb) ############################### ????
+    if not np.isfinite(norm) or norm == 0: ############################ ????
         raise ValueError(
             f"Query embedding norm invalid ({norm}); check emb_model.encode output."
         )
@@ -169,6 +134,7 @@ def jaccard_similarity(set1, set2):
 
 
 ### retrieval 
+
 
 
 def retrieve_passages(
@@ -240,7 +206,7 @@ def retrieve_passages(
 
 
 
-
+"""        I THINK THIS IS ALL IN THE RIGHT PLACE         """
 
 
 
@@ -268,120 +234,8 @@ def fill_prompt(
 
 
 
-def parse_llm_json(output_str):
-    """
-
-    
-    """
-    cleaned = re.sub(r"```(?:json)?\s*(.*?)```", r"\1", output_str, flags=re.DOTALL).strip()
-    parsed = {"answer": "", "confidence": 0.0, "cited_passages": []}
-    error_msg = None
-    raw_json = None
-
-    try:
-        raw_json = json.loads(cleaned)
-    except json.JSONDecodeError:
-        # fallback: extract last {...} block
-        blocks = re.findall(r"\{.*?\}", cleaned, flags=re.DOTALL)
-        if blocks:
-            try:
-                raw_json = json.loads(blocks[-1])
-            except Exception as e:
-                error_msg = f"Fallback JSON parse failed: {e}"
-        else:
-            error_msg = "No valid JSON object found"
-
-    if raw_json:
-        parsed["answer"] = str(raw_json.get("answer", "")).strip()
-        parsed["confidence"] = float(raw_json.get("confidence", 0.0))
-        cp = raw_json.get("cited_passages", [])
-        if isinstance(cp, list):
-            parsed["cited_passages"] = [
-                int(v) - 1 if str(v).isdigit() and int(v) > 0 else int(v)
-                for v in cp
-                if str(v).isdigit()
-            ]
-
-    return {
-        **parsed,
-        "cleaned_output": cleaned,
-        "raw_output": output_str,
-        "error": error_msg
-    }
 
 
-
-
-def generate_answer(
-        model, 
-        tokenizer, 
-        query, 
-        passages, 
-        gen_params, 
-        prompt_path=ANSWER_PROMPT
-        ):
-    prompt = fill_prompt(prompt_path, query, passages)
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True).to(model.device)
-
-    outputs = model.generate(
-        **inputs,
-        **gen_params,
-    )
-    sequence = outputs.sequences[0]
-    raw_text = tokenizer.decode(sequence, skip_special_tokens=True)
-
-    parsed = parse_llm_json(raw_text)
-
-    answer_text = parsed.get("answer", "").strip()
-    self_conf = float(parsed.get("confidence", 0.0))
-    cited_idxs = parsed.get("cited_passages", [])
-    is_idk = "i don't know" in answer_text.lower() or answer_text.lower().startswith("idk")
-
-    return {
-        "answer": answer_text,
-        "self_conf": self_conf,
-        "idk": is_idk,
-        "cited_passages": cited_idxs,
-        "raw_output": parsed.get("raw_output", raw_text),
-        "cleaned_output": parsed.get("cleaned_output", ""),
-        "error": parsed.get("error")
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-def score_NLI_fn(
-        answer, 
-        passage, 
-        reward_scheme
-        ):
-    """
-
-    
-    """
-    inputs = tokenizer_nli(passage, answer, return_tensors="pt", truncation=True).to("cuda")
-    with torch.no_grad():
-        logits = model_nli(**inputs).logits
-        pred_class = torch.argmax(torch.softmax(logits, dim=-1), dim=-1).item()
-
-    mnli_labels = ["contradiction", "neutral", "entailment"]
-    label = mnli_labels[pred_class]
-
-    nli_rewards = reward_scheme.get("nli", {"entailment": 0.5, "neutral": -0.2, "contradiction": -1.0})
-    return {
-        "entailment": nli_rewards.get("entailment", 0.5) if label == "entailment" else 0.0,
-        "neutral": nli_rewards.get("neutral", -0.2) if label == "neutral" else 0.0,
-        "contradiction": nli_rewards.get("contradiction", -1.0) if label == "contradiction" else 0.0,
-    }
 
 
 def rerank_answers(
@@ -412,7 +266,7 @@ def rerank_answers(
                 passage = passages[idx]
 
                 # NLI scoring
-                nli = score_NLI_fn(answer, passage, reward_scheme)
+                nli = nli_model.score(cand["answer"], passage, reward_scheme)  
                 entail_scores.append(nli.get("entailment", 0.0) - nli.get("contradiction", 0.0))
 
                 # Semantic similarity
@@ -442,51 +296,7 @@ def rerank_answers(
 
 
 
-
-
-
-
-
-""" EVALUATION METRICS + REWARD FUNCTION"""
-
-
-
-def NLI_check_answer_per_passage(
-        answer, 
-        passages, 
-        reward_scheme
-        ):
-    """
-
-    """
-    nli_rewards = reward_scheme.get("nli", {"entailment": 0.5, "neutral": -0.2, "contradiction": -1.0})
-    scores = []
-
-    for passage in passages:
-        inputs = tokenizer_nli(passage, answer, return_tensors="pt", truncation=True).to("cuda")
-        with torch.no_grad():
-            logits = model_nli(**inputs).logits
-            pred_class = torch.argmax(torch.softmax(logits, dim=-1), dim=-1).item()
-
-        mnli_labels = ["contradiction", "neutral", "entailment"]
-        label = mnli_labels[pred_class]
-        scores.append(nli_rewards[label])
-
-    return scores
-
-
-
-
-def normalise_for_em(s): # what is s in this case? the output???
-    """
-
-    
-    """
-    s = s.lower()  # lowercase
-    s = re.sub(r'\b(a|an|the)\b', ' ', s)  # remove articles
-    s = s.translate(str.maketrans('', '', string.punctuation))  # remove punctuation
-    s = ' '.join(s.split())  # remove extra whitespace
-    return s
+""" EVALUATION METRICS + REWARD FUNCTION""" # TO MAKE INTO A CLASS!!!!!!!!!!!!!
 
 
 
@@ -497,7 +307,7 @@ def compute_em(
     """
 
     """
-    return int(normalise_for_em(prediction) == normalise_for_em(gold_answer))
+    return int(normalise_string(prediction) == normalise_string(gold_answer))
 
 
 
@@ -508,8 +318,8 @@ def compute_f1(
     """
 
     """
-    pred_tokens = normalise_for_em(prediction).split() #### what's the pred + gold tokens????
-    gold_tokens = normalise_for_em(gold_answer).split()
+    pred_tokens = normalise_string(prediction).split() 
+    gold_tokens = normalise_string(gold_answer).split()
 
     common = set(pred_tokens) & set(gold_tokens)
     num_same = sum(min(pred_tokens.count(w), gold_tokens.count(w)) for w in common)
@@ -526,30 +336,28 @@ def compute_f1(
 
 
 
-
-
 def compute_agreement_reward(
-    model, 
-    tokenizer, 
     query, 
     passages, 
     gen_params, 
-    N=3):
+    N=3
+    ):
     """
     
     
-    
+
     """
     answers = []
     for _ in range(N):
-        answer_info = generate_answer(model, tokenizer, query, passages, gen_params)
+        prompt_text = fill_prompt(ANSWER_PROMPT, query, passages)
+        raw_text = llm_model.generate(prompt_text, gen_params)
+        answer_info = parse_llm_json(raw_text)
         answers.append(answer_info["answer"].strip().lower())
 
     counts = Counter(answers)
     maj_answer, maj_count = counts.most_common(1)[0]
     agreement_score = maj_count / N
     return agreement_score, maj_answer, answers
-
 
 
 
@@ -616,14 +424,17 @@ def compute_total_reward(
     else:
         nli_targets = []
 
+
+
     if nli_targets:
-        nli_scores = [score_NLI_fn(answer_info["answer"], p, reward_scheme) for p in nli_targets]
+        nli_scores = [nli_model.score(answer_info["answer"], p, reward_scheme) for p in nli_targets]
         entail_scores = [n.get("entailment", 0.0) - n.get("contradiction", 0.0) for n in nli_scores]
         mean_entail = np.mean(entail_scores)
         reward += mean_entail
         if use_confidence:
             conf = float(answer_info.get("confidence", 0.5))
             reward += conf * mean_entail
+
 
     # --- Multi-answer agreement ---
     if multi_answers is not None and len(multi_answers) > 1:
@@ -646,6 +457,20 @@ def compute_total_reward(
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 """ RUN PIPELINE """
 
 
@@ -653,25 +478,23 @@ def run_rag_pipeline(
     dataset,
     split,
     model_name,
-    model,
-    tokenizer,
+    llm_model,
+    rc, # why isn't this needed anymore? 
+    rc_idx,
+    config_name,
     queries,
     passage_metadata,
     passage_index,
     embed_model,
     gen_params,
     reward_scheme,
-    SEEDS=[1, 2, 3], ########### isn't this defined in configs???
+    SEEDS=SEEDS,
     top_k = MAX_RETRIEVED_PASSAGES,
     alpha = DEFAULT_HYBRID_ALPHA, 
     scale_idk_penalty = True,
-    score_NLI_result = True,
+    score_NLI_result = True, # why isn't this needed anymore? 
     use_confidence = True,
-    NLI_score_passages = "retrieved",
-    *,
-    out_path,
-    debug_path,
-    out_path_dpo, 
+    NLI_score_passages = "retrieved"
 ):
     """
 
@@ -685,13 +508,25 @@ def run_rag_pipeline(
     id_to_keywords = {p["passage_id"]: set(p.get("keywords", [])) for p in sparse_passages}
 
     for seed in SEEDS:
-
         torch.manual_seed(seed)
         random.seed(seed)
         np.random.seed(seed)
 
-        reward_name = rc.get("name", f"reward_config_{rc_idx+1}")
-        #paths = dataset_results_paths(dataset, split, model_name, reward_name, seed)
+
+        paths = dataset_results_paths(
+            dataset=dataset,
+            split=split,
+            model_name=model_name,
+            paradigm=config_name,       
+            reward_scheme=f"reward_config_{rc_idx + 1}",
+            seed=seed
+        )
+        out_path = paths["answers"]
+        debug_path = paths["debug"]
+
+
+        print(f"Results being appended to {out_path} as they are generated.")
+
 
         for qdata in tqdm(queries, desc="Processing queries", unit="query"):
             query_text = qdata["question"]
@@ -704,14 +539,10 @@ def run_rag_pipeline(
         ))
             
             query_for_embedding = clean_text(query_text)
-            # Embed query
-            query_emb = embed_model.encode(
-                [query_for_embedding],
-                normalize_embeddings=True,
-                convert_to_numpy=True
-            )[0]
 
-
+            query_emb = embed_model.encode([query_for_embedding])[0]  # returns a torch tensor or list
+            query_emb = np.array(query_emb, dtype=np.float32)         # convert to NumPy if needed
+            query_emb /= np.linalg.norm(query_emb)                    # normalize manually
 
             # Define function for retrieval
             def get_keywords(pid):
@@ -725,17 +556,24 @@ def run_rag_pipeline(
                 index=passage_index,
                 top_k=top_k,
                 alpha=alpha,
-                get_keywords_fn=get_keywords
+                keyword_field="keywords",
+                get_keywords_fn=get_keywords,
+                filter_fn=None
             )
 
             retrieved_ids = [passage_metadata[r["idx"]]["passage_id"] for r in retrieved_info]
             retrieved_texts = [passage_metadata[r["idx"]]["text"] for r in retrieved_info]
 
 
+
             # --- Multi-answer generation ---
             candidates = []
             for _ in range(gen_params["num_return_sequences"]):
-                cand = generate_answer(model, tokenizer, query_text, retrieved_texts, gen_params)
+                # Fill prompt with retrieved passages
+                prompt_text = fill_prompt(ANSWER_PROMPT, query_text, retrieved_texts)
+                
+                # Generate answer
+                cand = llm_model.generate(prompt_text, gen_params)
                 cand["seed"] = seed
                 candidates.append(cand)
 
@@ -744,9 +582,6 @@ def run_rag_pipeline(
 
             # --- Rerank candidates ---
             final_answer = rerank_answers(candidates, retrieved_texts, embed_model, reward_scheme)
-
-            preferences = [(final_answer, cand) for cand in candidates if cand != final_answer]
-
 
             # --- Compute rewards and save scaled version ---
             for c in candidates:
@@ -769,18 +604,8 @@ def run_rag_pipeline(
                 c["reward"] = raw_reward
                 c["reward_scaled"] = np.tanh(raw_reward)  # keeps reward in [-1, 1]
 
-            # --- Build DPO preference pairs ---
-            preferences = [(final_answer, cand) for cand in candidates if cand != final_answer]
 
-            if out_path_dpo:
-                for chosen, rejected in preferences:
-                    append_jsonl(out_path_dpo, {
-                        "query": query_text,
-                        "chosen": chosen["answer"],
-                        "rejected": rejected["answer"],
-                        "chosen_reward_scaled": chosen.get("reward_scaled", chosen.get("reward", 0.0)),
-                        "rejected_reward_scaled": rejected.get("reward_scaled", rejected.get("reward", 0.0))
-                    })
+
 
             # --- Save final result per seed ---
             if out_path:
@@ -813,7 +638,7 @@ def run_rag_pipeline(
                 append_jsonl(out_path, result_entry)
 
 
-                                # Save multi-answer debug info
+                # Save multi-answer debug info
                 if debug_path:
                     debug_entry = {
                         "question_id": query_id,
@@ -822,6 +647,10 @@ def run_rag_pipeline(
                         "seed": seed
                     }
                     append_jsonl(debug_path, debug_entry)
+
+
+
+
 
 
 
@@ -860,20 +689,13 @@ if __name__ == "__main__":
 
             for model_name, model_path in models.items():
                 print(f"\n--- Running {model_name} model ---")
+                llm_model = LLMModel(model_path)
 
                 enable_offload = True if model_name == "14B" else False
-                tokenizer, model = load_model_8bit(model_path, enable_fp32_cpu_offload=enable_offload)  
 
                 for config_name, config_list in reward_configs.items():  # RLHF, PPO, DPO
                     for rc_idx, rc in enumerate(config_list):
                         print(f"\nReward config {config_name} #{rc_idx + 1}: {rc}")
-
-                        # Build proper folder structure: <RLHF|PPO|DPO>/<reward_config_#>
-                        out_folder = f"data/results/{dataset}/{split}/{model_name}/{config_name}/reward_config_{rc_idx+1}"
-                        os.makedirs(out_folder, exist_ok=True)
-
-                        out_path = f"{out_folder}/results.jsonl"
-                        debug_path = f"{out_folder}/debug.jsonl"
 
 
                         # Run pipeline (streaming per query)
@@ -881,29 +703,26 @@ if __name__ == "__main__":
                             dataset=dataset,
                             split=split,
                             model_name=model_name,
-                            model=model,
-                            tokenizer=tokenizer,
+                            llm_model=llm_model,
+                            rc=rc,
+                            rc_idx=rc_idx,
+                            config_name=config_name,
                             queries=queries,
                             passage_metadata=passage_metadata,
                             passage_index=passage_index,
                             embed_model=embed_model,
                             gen_params=gen_params,
                             reward_scheme=reward_scheme,
-                            out_path=out_path,
-                            debug_path=debug_path,
                             top_k=MAX_RETRIEVED_PASSAGES,
                             alpha=DEFAULT_HYBRID_ALPHA,
                             scale_idk_penalty=rc["scale_idk_penalty"],
                             use_confidence=rc["use_confidence"],
-                            NLI_score_passages=rc["NLI_score_passages"]  # just a string now
+                            NLI_score_passages=rc["NLI_score_passages"]  
                         )
 
-                        print(f"Results being appended to {out_path} as they are generated.")
-
-
-                # Free model GPU memory
-                del model  
-                free_gpu_memory()
+                llm_model.free()
+                nli_model.free()
+                embed_model.free()
 
             # Explicitly free FAISS + passage metadata if memory is tight
             del passage_metadata

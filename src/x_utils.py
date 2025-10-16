@@ -30,15 +30,16 @@ nlp = spacy.load(SPACY_MODEL, disable=["textcat"])
 """          PATHS           """
 
 
+from pathlib import Path
+
 def processed_dataset_paths(dataset, split):
     """
     Return standard paths for processed dataset files.
 
-    Creates ``data/processed_datasets/{dataset}/{split}/`` if necessary and
-    returns paths for ``questions.jsonl`` and ``passages.jsonl``.
-
+    Creates `data/processed_datasets/{dataset}/{split}/` if necessary and
+    returns paths for `questions.jsonl` and `passages.jsonl`.
     """
-    base = Path(f"data/processed_datasets/{dataset}/{split}")
+    base = Path("data/processed_datasets") / dataset / split
     base.mkdir(parents=True, exist_ok=True)
     return {
         "base": base,
@@ -51,32 +52,32 @@ def dataset_rep_paths(dataset, split):
     """
     Return paths for dataset-level passage representations, embeddings, FAISS index, and sparse keywords.
     """
-    base = os.path.join("data", "representations", "datasets", dataset, split)
-    os.makedirs(base, exist_ok=True)
+    base = Path("data/representations/datasets") / dataset / split
+    base.mkdir(parents=True, exist_ok=True)
     return {
-        "passages_jsonl": os.path.join(base, f"{dataset}_passages.jsonl"),
-        "passages_emb": os.path.join(base, f"{dataset}_passages_emb.npy"),
-        "passages_index": os.path.join(base, f"{dataset}_faiss_passages.faiss"),
-        "passages_sparse_jsonl": os.path.join(base, f"{dataset}_passages_sparse.jsonl"),
+        "passages_jsonl": base / f"{dataset}_passages.jsonl",
+        "passages_emb": base / f"{dataset}_passages_emb.npy",
+        "passages_index": base / f"{dataset}_faiss_passages.faiss",
+        "passages_sparse_jsonl": base / f"{dataset}_passages_sparse.jsonl",
     }
 
 
+def dataset_results_paths(dataset, split, model_name, paradigm, reward_scheme, seed):
+    """
+    Return standard paths for saving results of RAG pipeline runs.
 
-
-def dataset_results_paths(dataset, split, model_name, reward_scheme, seed, paradigm=None):
-    parts = ["data", "results", dataset, split, model_name]
-    if paradigm:
-        parts.append(paradigm)
-    parts.append(reward_scheme)
-    parts.append(f"seed_{seed}")
-    base = os.path.join(*parts)
-    os.makedirs(base, exist_ok=True)
+    Creates `data/results/{dataset}/{split}/{model_name}/{paradigm}/{reward_scheme}/seed_{seed}/`.
+    """
+    base = Path("data/results") / dataset / split / model_name / paradigm / reward_scheme / f"seed_{seed}"
+    base.mkdir(parents=True, exist_ok=True)
     return {
         "base": base,
-        "answers": os.path.join(base, "answers.jsonl"),
-        "debug": os.path.join(base, "debug.jsonl"),
-        "log": os.path.join(base, "training.log"),
+        "answers": base / "answers.jsonl",
+        "debug": base / "debug.jsonl",
+        "log": base / "training.log",
     }
+
+
 
 
 
@@ -159,6 +160,48 @@ def append_jsonl(path: str, obj: Dict) -> None:
 
 
 
+def parse_llm_json(output_str):
+    """
+
+    
+    """
+    cleaned = re.sub(r"```(?:json)?\s*(.*?)```", r"\1", output_str, flags=re.DOTALL).strip()
+    parsed = {"answer": "", "confidence": 0.0, "cited_passages": []}
+    error_msg = None
+    raw_json = None
+
+    try:
+        raw_json = json.loads(cleaned)
+    except json.JSONDecodeError:
+        # fallback: extract last {...} block
+        blocks = re.findall(r"\{.*?\}", cleaned, flags=re.DOTALL)
+        if blocks:
+            try:
+                raw_json = json.loads(blocks[-1])
+            except Exception as e:
+                error_msg = f"Fallback JSON parse failed: {e}"
+        else:
+            error_msg = "No valid JSON object found"
+
+    if raw_json:
+        parsed["answer"] = str(raw_json.get("answer", "")).strip()
+        parsed["confidence"] = float(raw_json.get("confidence", 0.0))
+        cp = raw_json.get("cited_passages", [])
+        if isinstance(cp, list):
+            parsed["cited_passages"] = [
+                int(v) - 1 if str(v).isdigit() and int(v) > 0 else int(v)
+                for v in cp
+                if str(v).isdigit()
+            ]
+
+    return {
+        **parsed,
+        "cleaned_output": cleaned,
+        "raw_output": output_str,
+        "error": error_msg
+    }
+
+
 
 
 """       CLEANING          """
@@ -175,6 +218,20 @@ def clean_text(text):
     text = re.sub(r"={2,}.*?={2,}", "", text)
     text = unicodedata.normalize("NFKC", text)
     return text
+
+
+
+def normalise_string(
+        string
+        ): 
+    """
+    
+    """
+    s = s.lower()  
+    s = re.sub(r'\b(a|an|the)\b', ' ', s)  # remove articles
+    s = s.translate(str.maketrans('', '', string.punctuation))  # remove punctuation
+    s = ' '.join(s.split())  # remove extra whitespace
+    return s
 
 
 def strip_accents(t: str) -> str:
