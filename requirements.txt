@@ -1,0 +1,15 @@
+torch
+faiss
+transformers
+sentence_transformers
+tqdm
+numpy
+scikit-learn
+faiss-cpu
+spacy
+
+
+
+
+
+
