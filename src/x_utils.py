@@ -120,7 +120,10 @@ def pid_plus_title(
 
 
 
-def load_jsonl(path: str, log_skipped: bool = False) -> Iterator[Dict]:
+def load_jsonl(
+        path, 
+        log_skipped
+        ):
     """Yield objects from a JSONL file one by one.
 
     Lines that are empty or fail to parse as JSON are skipped. If
