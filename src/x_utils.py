@@ -64,7 +64,7 @@ def dataset_rep_paths(dataset, split):
 
 def dataset_results_paths(dataset, split, model_name, paradigm, reward_scheme, seed):
     """
-    Return standard paths for saving results of RAG pipeline runs.
+    Return standard paths for saving or retrieving results of RAG pipeline runs.
 
     Creates `data/results/{dataset}/{split}/{model_name}/{paradigm}/{reward_scheme}/seed_{seed}/`.
     """
@@ -79,7 +79,24 @@ def dataset_results_paths(dataset, split, model_name, paradigm, reward_scheme, s
 
 
 
+from pathlib import Path
 
+def model_paths(dataset, split, model_name, paradigm, reward_scheme, seed, stage="finetuned"):
+    """
+    Return standard paths for model checkpoints (DPO, PPO, etc).
+
+    Creates:
+    `models/{paradigm}/{dataset}/{split}/{model_name}/{reward_scheme}/seed_{seed}/`
+    """
+    base = Path("models") / paradigm / dataset / split / model_name / reward_scheme / f"seed_{seed}" / stage
+    base.mkdir(parents=True, exist_ok=True)
+    return {
+        "base": base,
+        "model": base / "model",          # folder for model.save_pretrained()
+        "tokenizer": base / "tokenizer",  # folder for tokenizer.save_pretrained()
+        "log": base / "training.log",     # optional training log
+        "config": base / "config.json",   # optional config
+    }
 
 
 

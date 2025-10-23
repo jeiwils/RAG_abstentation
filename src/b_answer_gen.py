@@ -238,35 +238,85 @@ def fill_prompt(
 
 
 
-def rerank_answers(
-    candidates,
-    passages,
-    embed_model,
-    reward_scheme
-):
-    """
+# def rerank_answers(    # this gets the 'final answer' for DPO, right???
+#     candidates,
+#     passages,
+#     embed_model,
+#     reward_scheme
+# ):
+#     """
 
     
+#     """
+#     scores = []
+
+#     for cand in candidates:
+#         answer = cand["answer"].strip()
+#         cited = cand.get("cited_passages", [])
+#         conf = cand.get("confidence", 0.0)
+
+#         # Deprioritize IDK unless all fail
+#         if answer.lower() in ["i don't know", "idk"]:
+#             scores.append((-1.0, cand))
+#             continue
+
+#         entail_scores, sim_scores = [], []
+#         for idx in cited:
+#             if 0 <= idx < len(passages):
+#                 passage = passages[idx]
+
+#                 # NLI scoring
+#                 nli = nli_model.score(cand["answer"], passage, reward_scheme)  
+#                 entail_scores.append(nli.get("entailment", 0.0) - nli.get("contradiction", 0.0))
+
+#                 # Semantic similarity
+#                 ans_emb = embed_model.encode([answer])
+#                 pas_emb = embed_model.encode([passage])
+#                 sim = cosine_similarity(ans_emb, pas_emb)[0][0]
+#                 sim_scores.append(sim)
+
+#         mean_entail = np.mean(entail_scores) if entail_scores else 0.0
+#         mean_sim = np.mean(sim_scores) if sim_scores else 0.0
+
+#         rerank_score = 0.5 * mean_entail + 0.3 * mean_sim + 0.2 * conf
+#         scores.append((rerank_score, cand))
+
+#     best = max(scores, key=lambda x: x[0])[1]
+#     return best
+
+
+
+
+def rerank_answers(
+        candidates, 
+        passages, 
+        embed_model, # why do I need this? don't I need an NLI model as well? 
+        reward_scheme): 
+    """
+    Rank all candidates and return them sorted (highest score first).
+
+    Returns:
+        list of tuples: (rerank_score, original_index, candidate_dict), sorted descending.
     """
     scores = []
 
-    for cand in candidates:
+    for idx, cand in enumerate(candidates):
         answer = cand["answer"].strip()
         cited = cand.get("cited_passages", [])
         conf = cand.get("confidence", 0.0)
 
         # Deprioritize IDK unless all fail
         if answer.lower() in ["i don't know", "idk"]:
-            scores.append((-1.0, cand))
+            scores.append((-1.0, idx, cand))
             continue
 
         entail_scores, sim_scores = [], []
-        for idx in cited:
-            if 0 <= idx < len(passages):
-                passage = passages[idx]
+        for p_idx in cited:
+            if 0 <= p_idx < len(passages):
+                passage = passages[p_idx]
 
                 # NLI scoring
-                nli = nli_model.score(cand["answer"], passage, reward_scheme)  
+                nli = nli_model.score(answer, passage, reward_scheme)
                 entail_scores.append(nli.get("entailment", 0.0) - nli.get("contradiction", 0.0))
 
                 # Semantic similarity
@@ -279,15 +329,11 @@ def rerank_answers(
         mean_sim = np.mean(sim_scores) if sim_scores else 0.0
 
         rerank_score = 0.5 * mean_entail + 0.3 * mean_sim + 0.2 * conf
-        scores.append((rerank_score, cand))
+        scores.append((rerank_score, idx, cand))
 
-    best = max(scores, key=lambda x: x[0])[1]
-    return best
-
-
-
-
-
+    # Sort descending by score
+    sorted_scores = sorted(scores, key=lambda x: x[0], reverse=True)
+    return sorted_scores  # list of tuples: (score, idx, candidate)
 
 
 
@@ -581,7 +627,8 @@ def run_rag_pipeline(
             multi_answers = [c["answer"].strip() for c in candidates]
 
             # --- Rerank candidates ---
-            final_answer = rerank_answers(candidates, retrieved_texts, embed_model, reward_scheme)
+            candidates = rerank_answers(candidates, retrieved_texts, embed_model, reward_scheme)
+            final_answer = candidates[0][2]
 
             # --- Compute rewards and save scaled version ---
             for c in candidates:
