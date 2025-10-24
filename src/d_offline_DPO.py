@@ -14,6 +14,7 @@ import torch
 from torch import nn
 from torch.cuda.amp import autocast
 from torch.utils.data import Dataset, DataLoader
+from torch.amp import GradScaler
 from transformers import AutoTokenizer, AutoModelForCausalLM, AdamW
 from tqdm import tqdm
 from .x_utils import load_jsonl, dataset_results_paths, model_paths, processed_dataset_paths
@@ -22,22 +23,32 @@ from z_configs import BGE_MODEL, DEVICE, reward_scheme
 from sentence_transformers import SentenceTransformer
 
 
+from .rlhf_utils import tokenize_prompt_answer, compute_token_log_probs, batch_tokenize, save_model_and_tokenizer
 
-class DPODataset(Dataset): # why do I need to define this as a class??
-    """
-    Stores (query, chosen, rejected) triplets for DPO training
-    """
-    def __init__(self, entries):
-        self.entries = entries
+
+
+
+
+
+class DPODataset(Dataset):
+    """Stores (query, chosen, rejected) triplets for DPO training."""
+    def __init__(self, pairs):
+        self.pairs = pairs
 
     def __len__(self):
-        return len(self.entries)
+        return len(self.pairs)
 
     def __getitem__(self, idx):
-        e = self.entries[idx]
+        e = self.pairs[idx]
         return e["query"], e["chosen"], e["rejected"]
 
 
+
+
+
+def dpo_collate_fn(batch):
+    queries, chosens, rejecteds = zip(*batch)
+    return list(queries), list(chosens), list(rejecteds)
 
 
 
@@ -91,90 +102,67 @@ def construct_dpo_pairs(
 
 
 
-
-
-def compute_dpo_loss(
-    model,
-    tokenizer,
-    queries,
-    chosens,
-    rejecteds,
-    device="cuda",
-    max_length=512,
-    beta=0.1,
-):
+# -----------------------
+# DPO loss
+# -----------------------
+def compute_dpo_loss(model, tokenizer, queries, chosens, rejecteds, device="cuda", max_length=512, beta=0.1):
     """
-    Efficient batch DPO loss computation with proper padding handling.
-
-    Each sample = (query, chosen, rejected)
-    Returns scalar DPO loss for the batch.
+    Compute Direct Preference Optimization (DPO) loss for a batch.
+    Fully differentiable; model.train() should be active.
     """
+    # Concatenate queries + responses
+    chosen_texts = [f"{q}\n{c}" for q, c in zip(queries, chosens)]
+    rejected_texts = [f"{q}\n{r}" for q, r in zip(queries, rejecteds)]
 
-    # Ensure tokenizer has a pad_token
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    pad_id = tokenizer.pad_token_id
-
-    # Tokenize in batch
+    # Tokenize
     chosen_batch = tokenizer(
-        [q + "\n" + c for q, c in zip(queries, chosens)],
+        chosen_texts,
+        padding=True,
         truncation=True,
         max_length=max_length,
-        padding="max_length",
-        return_tensors="pt",
+        return_tensors="pt"
     ).to(device)
 
     rejected_batch = tokenizer(
-        [q + "\n" + r for q, r in zip(queries, rejecteds)],
+        rejected_texts,
+        padding=True,
         truncation=True,
         max_length=max_length,
-        padding="max_length",
-        return_tensors="pt",
+        return_tensors="pt"
     ).to(device)
 
-    # CrossEntropyLoss with ignore_index for padding
-    loss_fct = nn.CrossEntropyLoss(reduction="none", ignore_index=pad_id)
+    # Forward pass to get logits
+    with autocast(device_type='cuda', dtype=torch.float16):
+        chosen_logits = model(chosen_batch["input_ids"], attention_mask=chosen_batch["attention_mask"]).logits
+        rejected_logits = model(rejected_batch["input_ids"], attention_mask=rejected_batch["attention_mask"]).logits
 
-    # Compute model outputs
-    with autocast(device_type="cuda" if "cuda" in device else "cpu", dtype=torch.float16):
-        chosen_out = model(**chosen_batch)
-        rejected_out = model(**rejected_batch)
+    # Compute per-token log-probs
+    chosen_logprobs = torch.nn.functional.log_softmax(chosen_logits, dim=-1)
+    rejected_logprobs = torch.nn.functional.log_softmax(rejected_logits, dim=-1)
 
-    # Shift logits and labels for causal LM prediction
-    shift_logits_c = chosen_out.logits[..., :-1, :].contiguous()
-    shift_labels_c = chosen_batch.input_ids[..., 1:].contiguous()
-    shift_logits_r = rejected_out.logits[..., :-1, :].contiguous()
-    shift_labels_r = rejected_batch.input_ids[..., 1:].contiguous()
+    # Gather log-probs of actual tokens
+    chosen_token_ids = chosen_batch["input_ids"].unsqueeze(-1)
+    rejected_token_ids = rejected_batch["input_ids"].unsqueeze(-1)
 
-    # Per-token loss
-    chosen_loss = loss_fct(shift_logits_c.view(-1, shift_logits_c.size(-1)), shift_labels_c.view(-1))
-    rejected_loss = loss_fct(shift_logits_r.view(-1, shift_logits_r.size(-1)), shift_labels_r.view(-1))
+    chosen_token_logprobs = torch.gather(chosen_logprobs, -1, chosen_token_ids).squeeze(-1)
+    rejected_token_logprobs = torch.gather(rejected_logprobs, -1, rejected_token_ids).squeeze(-1)
 
-    # Reshape back to sequence shape
-    chosen_loss = chosen_loss.view(shift_labels_c.size())
-    rejected_loss = rejected_loss.view(shift_labels_r.size())
+    # Average over non-padding tokens
+    chosen_mask = chosen_batch["attention_mask"]
+    rejected_mask = rejected_batch["attention_mask"]
 
-    # Mask padding tokens
-    chosen_mask = (shift_labels_c != pad_id).float()
-    rejected_mask = (shift_labels_r != pad_id).float()
+    chosen_mean = (chosen_token_logprobs * chosen_mask).sum(dim=1) / chosen_mask.sum(dim=1)
+    rejected_mean = (rejected_token_logprobs * rejected_mask).sum(dim=1) / rejected_mask.sum(dim=1)
 
-    # Average log-probs per sequence
-    chosen_lp = -(chosen_loss * chosen_mask).sum(dim=1) / chosen_mask.sum(dim=1)
-    rejected_lp = -(rejected_loss * rejected_mask).sum(dim=1) / rejected_mask.sum(dim=1)
-
-    # DPO loss
-    diff = chosen_lp - rejected_lp
+    # DPO pairwise loss
+    diff = chosen_mean - rejected_mean
     loss = -torch.log(torch.sigmoid(beta * diff) + 1e-8).mean()
 
     return loss
 
-
-
-
-
-
-
+# -----------------------
+# Training loop
+# -----------------------
 def train_dpo(
     dataset,
     split,
@@ -185,60 +173,56 @@ def train_dpo(
     embed_model,
     reward_scheme,
     tokenizer_name=None,
-    lr=5e-6,
+    device="cuda",
     batch_size=2,
     epochs=1,
-    device="cuda"
+    lr=5e-6,
+    max_length=512,
+    beta=0.1,
+    max_grad_norm=1.0
 ):
     """
-    Train a model using offline DPO.
+    Offline DPO training: internally constructs DPO pairs from candidates,
+    then fine-tunes the model using batch DPO loss.
     """
     tokenizer_name = tokenizer_name or model_path
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-    model = AutoModelForCausalLM.from_pretrained(model_path)
-    model.to(device)
+    model = AutoModelForCausalLM.from_pretrained(model_path).to(device)
     model.train()
 
-    # Load DPO pairs (reranking happens here)
-    print(f"[INFO] Loading DPO pairs for {dataset}/{split}/{model_name}/DPO/{seed}")
+    # Construct DPO pairs internally
+    print(f"[INFO] Constructing DPO pairs for {dataset}/{split}/{model_name}/seed_{seed}...")
     pairs = construct_dpo_pairs(dataset, split, model_name, seed, passages, embed_model, reward_scheme)
+    if not pairs:
+        print("[WARNING] No DPO pairs were constructed. Skipping training.")
+        return
+
     dataset_obj = DPODataset(pairs)
-    dataloader = DataLoader(dataset_obj, batch_size=batch_size, shuffle=True)
+    dataloader = DataLoader(dataset_obj, batch_size=batch_size, shuffle=True, collate_fn=dpo_collate_fn)
 
     optimizer = AdamW(model.parameters(), lr=lr)
+    scaler = GradScaler()  
 
     for epoch in range(epochs):
-        print(f"\n[Epoch {epoch+1}]")
         total_loss = 0.0
-
-        for batch in tqdm(dataloader, desc="DPO training"):
-            queries, chosens, rejecteds = batch
+        for queries, chosens, rejecteds in tqdm(dataloader, desc=f"DPO Epoch {epoch+1}"):
             optimizer.zero_grad()
-
-            # Compute DPO loss for the batch
-            loss = compute_dpo_loss(model, tokenizer, queries, chosens, rejecteds, device=device)
-            loss.backward()
-            optimizer.step()
-
+            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+                loss = compute_dpo_loss(model, tokenizer, queries, chosens, rejecteds, device, max_length, beta)
+            scaler.scale(loss).backward()
+            # Gradient clipping
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            scaler.step(optimizer)
+            scaler.update()
             total_loss += loss.item()
 
-        avg_loss = total_loss / len(dataloader)
-        print(f"Epoch {epoch+1} complete. Avg loss: {avg_loss:.4f}")
+        print(f"Epoch {epoch+1} complete. Avg loss: {total_loss/len(dataloader):.4f}")
 
-    # Save model
-    save_paths = model_paths(
-        dataset=dataset,
-        split=split,
-        model_name=model_name,
-        paradigm="DPO",
-        reward_scheme=f"reward_config_{seed+1}",
-        seed=seed,
-        stage="finetuned"
-    )
-
-    model.save_pretrained(save_paths["model"])
-    tokenizer.save_pretrained(save_paths["tokenizer"])
-    print(f"[INFO] DPO model saved to {save_paths['model']}")
+    # Save final model
+    save_paths = model_paths(dataset, split, model_name, "DPO", f"reward_config_{seed+1}", seed, stage="finetuned")
+    save_model_and_tokenizer(model, tokenizer, save_paths)
+    print(f"[INFO] Model saved at {save_paths}")
 
 
 
@@ -281,7 +265,6 @@ if __name__ == "__main__":
                         passages=passages,
                         embed_model=embed_model,
                         reward_scheme=reward_scheme,
-                        lr=5e-6,
                         batch_size=1,
                         epochs=1,
                         device=DEVICE

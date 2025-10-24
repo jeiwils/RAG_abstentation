@@ -14,8 +14,12 @@ from .x2_utils2 import pid_plus_title
 
 BGE_MODEL = os.environ.get("BGE_MODEL", "all-MiniLM-L6-v2")
 SPACY_MODEL = os.environ.get("SPACY_MODEL", "en_core_web_sm")
+REWARD_MODEL = os.environ.get("REWARD_MODEL", "OpenAssistant/reward-model-deberta-v3-base")
+POLICY_MODEL = os.environ.get("POLICY_MODEL", "EleutherAI/gpt-neo-1.3B")
+
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-RLHF_MODEL = "EleutherAI/gpt-neo-1.3B"
+
 
 
 
